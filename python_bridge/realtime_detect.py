@@ -1,9 +1,4 @@
-"""
-realtime_detect.py — PyTorch Real-Time Sign Language Translator (Task API)
-========================================================================
-Loads the trained PyTorch LSTM model and runs real-time sign detection via webcam
-using the modern MediaPipe Task API (Python 3.13 compatible).
-"""
+"""Run real-time sign detection using the trained PyTorch LSTM model."""
 
 import os
 import time
@@ -15,8 +10,7 @@ import torch.nn as nn
 from collections import deque
 
 import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
+from landmarks import extract_landmarks
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -28,7 +22,6 @@ NUM_FEATURES = 126
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "sign_model.pth")
 LABELS_PATH = os.path.join(BASE_DIR, "labels.pkl")
-TASK_PATH   = os.path.join(BASE_DIR, "hand_landmarker.task")
 
 STABILITY_FRAMES = 5
 CONFIDENCE_THRESHOLD = 0.75
@@ -180,18 +173,17 @@ HAND_CONNECTIONS = [
     (5, 9), (9, 13), (13, 17)
 ]
 
-def draw_hand_landmarks(frame, detection_result):
-    if not detection_result.hand_landmarks:
-        return
+def draw_hand_landmarks(frame, results):
     h, w = frame.shape[:2]
-    for hand_landmarks in detection_result.hand_landmarks:
-        # Draw Connections
+    for hand_landmarks in (results.left_hand_landmarks, results.right_hand_landmarks):
+        if not hand_landmarks:
+            continue
+        points = hand_landmarks.landmark
         for a, b in HAND_CONNECTIONS:
-            pt1 = (int(hand_landmarks[a].x * w), int(hand_landmarks[a].y * h))
-            pt2 = (int(hand_landmarks[b].x * w), int(hand_landmarks[b].y * h))
+            pt1 = (int(points[a].x * w), int(points[a].y * h))
+            pt2 = (int(points[b].x * w), int(points[b].y * h))
             cv2.line(frame, pt1, pt2, (0, 255, 0), 2)
-        # Draw Joints
-        for i, lm in enumerate(hand_landmarks):
+        for i, lm in enumerate(points):
             center = (int(lm.x * w), int(lm.y * h))
             cv2.circle(frame, center, 4, (0, 0, 255), -1 if i==0 else 2)
 
@@ -236,8 +228,8 @@ def draw_ui(frame, segmenter):
 
 # ── MAIN LOOP ──
 def main():
-    if not os.path.exists(MODEL_PATH) or not os.path.exists(LABELS_PATH) or not os.path.exists(TASK_PATH):
-        print("[ERROR] Model/Labels/Task file missing.")
+    if not os.path.exists(MODEL_PATH) or not os.path.exists(LABELS_PATH):
+        print("[ERROR] Model or labels file missing.")
         return
 
     with open(LABELS_PATH, 'rb') as f:
@@ -249,9 +241,11 @@ def main():
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
     model.eval()
 
-    base_options = python.BaseOptions(model_asset_path=TASK_PATH)
-    options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=2)
-    detector = vision.HandLandmarker.create_from_options(options)
+    detector = mp.solutions.holistic.Holistic(
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+        model_complexity=1,
+    )
 
     segmenter = SignSegmenter()
     frame_buffer = deque([np.zeros(NUM_FEATURES)]*SEQUENCE_LENGTH, maxlen=SEQUENCE_LENGTH)
@@ -261,19 +255,11 @@ def main():
         ret, frame = cap.read()
         if not ret: break
         frame = cv2.flip(frame, 1)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        result = detector.detect(mp_image)
-        
-        lh, rh = np.zeros(63), np.zeros(63)
-        hands_present = False
-        if result.hand_landmarks:
-            hands_present = True
-            for i, h_lms in enumerate(result.hand_landmarks):
-                hand_flat = np.array([[lm.x, lm.y, lm.z] for lm in h_lms]).flatten()
-                if result.handedness[i][0].category_name == 'Left': lh = hand_flat
-                else: rh = hand_flat
-        
-        landmarks = np.concatenate([lh, rh])
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb_frame.flags.writeable = False
+        result = detector.process(rgb_frame)
+        landmarks = extract_landmarks(result)
+        hands_present = bool(result.left_hand_landmarks or result.right_hand_landmarks)
         frame_buffer.append(landmarks)
 
         pred_label, conf = None, 0.0
@@ -288,7 +274,7 @@ def main():
         segmenter.update(pred_label, float(conf), landmarks, hands_present)
         draw_hand_landmarks(frame, result)
         draw_ui(frame, segmenter)
-        cv2.imshow("Sign Language Translator (Task API)", frame)
+        cv2.imshow("Sign Language Translator", frame)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'): break

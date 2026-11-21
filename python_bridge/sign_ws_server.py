@@ -24,8 +24,7 @@ from websockets.exceptions import ConnectionClosed
 import torch
 import torch.nn as nn
 import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
+from landmarks import extract_landmarks
 
 # ── CONFIGURATION ──────────────────────────────────────────────────────────────
 
@@ -35,7 +34,6 @@ HOST        = os.environ.get("SIGN_LANGUAGE_HOST",  "0.0.0.0")
 PORT        = int(os.environ.get("SIGN_LANGUAGE_PORT", "8765"))
 MODEL_PATH  = os.environ.get("MODEL_PATH",  os.path.join(_ROOT, "sign_model.pth"))
 LABELS_PATH = os.environ.get("LABELS_PATH", os.path.join(_ROOT, "labels.pkl"))
-TASK_PATH   = os.path.join(_ROOT, "hand_landmarker.task")
 
 SEQUENCE_LENGTH = 30
 NUM_FEATURES    = 126   # 21 left-hand + 21 right-hand landmarks × 3 coords
@@ -83,7 +81,7 @@ class SignLanguageLSTM(nn.Module):
 _model:         SignLanguageLSTM | None = None
 _labels:        list[str]               = []
 _device:        torch.device            = torch.device("cpu")
-_detector:      vision.HandLandmarker | None = None
+_detector:      mp.solutions.holistic.Holistic | None = None
 
 
 def load_model() -> None:
@@ -98,10 +96,6 @@ def load_model() -> None:
         print(f"[ERROR] Labels not found: {LABELS_PATH}")
         sys.exit(1)
 
-    if not os.path.isfile(TASK_PATH):
-        print(f"[ERROR] Task model not found: {TASK_PATH}")
-        sys.exit(1)
-
     with open(LABELS_PATH, "rb") as f:
         label_encoder = pickle.load(f)
     _labels = list(label_encoder.classes_)
@@ -111,19 +105,14 @@ def load_model() -> None:
     _model.load_state_dict(torch.load(MODEL_PATH, map_location=_device, weights_only=True))
     _model.eval()
 
-    # Initialize MediaPipe Task API HandLandmarker
-    base_options = python.BaseOptions(model_asset_path=TASK_PATH)
-    options = vision.HandLandmarkerOptions(
-        base_options=base_options,
-        num_hands=2,
-        min_hand_detection_confidence=0.5,
-        min_hand_presence_confidence=0.5,
-        min_tracking_confidence=0.5
+    _detector = mp.solutions.holistic.Holistic(
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+        model_complexity=1,
     )
-    _detector = vision.HandLandmarker.create_from_options(options)
 
     print(f"[INFO] Model loaded — {len(_labels)} classes: {_labels}")
-    print(f"[INFO] MediaPipe Task API initialized.")
+    print("[INFO] MediaPipe Holistic initialized.")
 
 
 # ── PREDICT FROM A SINGLE FRAME ───────────────────────────────────────────────
@@ -277,31 +266,12 @@ async def handle_client(websocket) -> None:
             # 1. Flip frame to match mirrored training data
             frame = cv2.flip(frame, 1)
 
-            # 2. MediaPipe Task API detection (using compatible constructor)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            detection_result = _detector.detect(mp_image)
-
-            # Initialize empty landmarks
-            lh = np.zeros(63)
-            rh = np.zeros(63)
-            hands_present = False
-
-            if detection_result.hand_landmarks:
-                hands_present = True
-                for i, hand_landmarks in enumerate(detection_result.hand_landmarks):
-                    # Handedness labels: 'Left' or 'Right'
-                    label = detection_result.handedness[i][0].category_name
-                    # MediaPipe handedness is often mirrored in camera views (opposite of viewer)
-                    # For this project we match 'Left' (0) to lh and 'Right' (1) to rh if possible.
-                    # Note: handedness index and category_name depend on the model/api.
-                    hand_flat = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks]).flatten()
-                    
-                    if label == 'Left':
-                        lh = hand_flat
-                    else:
-                        rh = hand_flat
-
-            landmarks = np.concatenate([lh, rh])
+            # 2. Extract landmarks with the same model and ordering used during training.
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb_frame.flags.writeable = False
+            results = _detector.process(rgb_frame)
+            landmarks = extract_landmarks(results)
+            hands_present = bool(results.left_hand_landmarks or results.right_hand_landmarks)
             frame_buffer.append(landmarks)
 
             # --- Inference and Segmenter Update ---

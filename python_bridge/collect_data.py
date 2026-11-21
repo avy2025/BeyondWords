@@ -22,13 +22,14 @@ import mediapipe as mp
 import mediapipe.python.solutions.holistic as mp_holistic
 import mediapipe.python.solutions.drawing_utils as mp_drawing
 import mediapipe.python.solutions.drawing_styles as mp_drawing_styles
+from landmarks import extract_landmarks
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 
 # All sign labels to collect data for
-LABELS = ["NOTHING", "HI", "WE", "ARE", "AT", "I", "T", "M", "HELLO", "THANK_YOU", "SORRY"]
+LABELS = ["NOTHING", "HELLO", "THANK_YOU", "SORRY", "WE", "ARE", "AT", "D", "T", "C"]
 
 NUM_SEQUENCES = 30       # Number of sequences per label
 SEQUENCE_LENGTH = 30     # Number of frames per sequence
@@ -53,38 +54,6 @@ def init_holistic():
         min_tracking_confidence=0.5,
         model_complexity=1
     )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# LANDMARK EXTRACTION  (shared logic — must match train & detect scripts)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def extract_landmarks(results):
-    """
-    Extract a flat 126-value numpy array from MediaPipe Holistic results.
-
-    Layout:
-      [0:63]   → left hand  (21 landmarks × 3)
-      [63:126] → right hand (21 landmarks × 3)
-
-    If a hand is not detected, its section is filled with zeros.
-    """
-    # Left hand: 21 landmarks × (x, y, z) = 63 values
-    if results.left_hand_landmarks:
-        left_hand = np.array([[lm.x, lm.y, lm.z]
-                              for lm in results.left_hand_landmarks.landmark]).flatten()
-    else:
-        left_hand = np.zeros(21 * 3)  # 63 zeros
-
-    # Right hand: 21 landmarks × (x, y, z) = 63 values
-    if results.right_hand_landmarks:
-        right_hand = np.array([[lm.x, lm.y, lm.z]
-                               for lm in results.right_hand_landmarks.landmark]).flatten()
-    else:
-        right_hand = np.zeros(21 * 3)  # 63 zeros
-
-    # Concatenate into a single 126-element vector
-    return np.concatenate([left_hand, right_hand])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -312,8 +281,8 @@ def main():
             print("Done [OK]")
 
         # ── PAUSE BETWEEN LABELS ─────────────────────────────────────────
-        if label_idx < len(LABELS) - 1:
-            next_label = LABELS[label_idx + 1]
+        if label_idx < len(selected_labels) - 1:
+            next_label = selected_labels[label_idx + 1]
             print(f"\n  [OK] Finished '{label}'. Next sign: '{next_label}' in {PAUSE_BETWEEN_LABELS} seconds...")
 
             pause_start = time.time()

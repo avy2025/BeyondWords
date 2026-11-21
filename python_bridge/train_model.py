@@ -24,7 +24,7 @@ from sklearn.preprocessing import LabelEncoder
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 
-LABELS = ["NOTHING", "HI", "WE", "ARE", "AT", "I", "T", "M", "HELLO", "THANK_YOU"]
+LABELS = ["NOTHING", "HELLO", "THANK_YOU", "SORRY", "WE", "ARE", "AT", "D", "T", "C"]
 NUM_SEQUENCES = 30
 SEQUENCE_LENGTH = 30
 NUM_FEATURES = 126
