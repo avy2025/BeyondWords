@@ -10,6 +10,12 @@ const AccountSchema = new mongoose.Schema({
   completedLessons: [{
     lessonId: { type: mongoose.Schema.Types.ObjectId, ref: 'Lesson' },
     score: { type: Number },
+    status: { 
+      type: String, 
+      enum: ['PASSED', 'FAILED', 'LEGACY_UNKNOWN'] 
+    },
+    attemptsCount: { type: Number, default: 1 },
+    bestScore: { type: Number },
     completedAt: { type: Date, default: Date.now }
   }],
   achievements: [{
@@ -17,6 +23,10 @@ const AccountSchema = new mongoose.Schema({
     description: { type: String, required: true },
     icon: { type: String },
     unlockedAt: { type: Date, default: Date.now }
+  }],
+  // Atomic ledger tracking applied XP grants to prevent duplicate XP awarding
+  appliedGrantKeys: [{
+    type: String
   }],
   createdAt: { type: Date, default: Date.now },
 });
