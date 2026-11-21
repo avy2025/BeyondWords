@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node src/server.js"
+    "dev": "node src/server.js",
+    "test": "node --test test/phase1b.test.js",
+    "seed": "node seed.js",
+    "migrate:progress": "node src/migrations/migrateHistoricalProgress.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
