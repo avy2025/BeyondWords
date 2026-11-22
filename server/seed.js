@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import Lesson from './src/models/Lesson.js';
 import Quiz from './src/models/Quiz.js';
+import { germanLessons, germanQuizzes } from './src/seeds/germanCurriculum.js';
 
 dotenv.config();
 
@@ -231,6 +232,49 @@ export async function seedDB({ log = true } = {}) {
         results.quizzesCreated++;
         if (log) console.log(`[SEED] Created quiz for: "${lessonDoc.title}"`);
       } else {
+        results.quizzesPreserved++;
+      }
+    }
+  }
+
+  // 5. Handle German Academy Curriculum (Levels 1 - 10) Idempotently
+  for (let i = 0; i < germanLessons.length; i++) {
+    const item = germanLessons[i];
+    let lessonDoc = await Lesson.findOne({ stableKey: item.stableKey });
+
+    if (!lessonDoc) {
+      lessonDoc = await Lesson.create(item);
+      results.lessonsCreated++;
+      if (log) console.log(`[SEED] Created German Academy lesson: "${lessonDoc.title}" (${item.stableKey})`);
+    } else {
+      // Keep existing record updated with curriculum blocks while preserving its _id
+      lessonDoc.title = item.title;
+      lessonDoc.description = item.description;
+      lessonDoc.academy = item.academy;
+      lessonDoc.level = item.level;
+      lessonDoc.lessonType = item.lessonType;
+      lessonDoc.xpReward = item.xpReward;
+      lessonDoc.contentBlocks = item.contentBlocks;
+      await lessonDoc.save();
+      results.lessonsPreserved++;
+    }
+
+    // 6. German Quiz idempotent handling
+    const quizData = germanQuizzes.find(q => q.stableKey === item.stableKey);
+    if (quizData && lessonDoc) {
+      const existingQuiz = await Quiz.findOne({ lessonId: lessonDoc._id });
+      if (!existingQuiz) {
+        await Quiz.create({
+          lessonId: lessonDoc._id,
+          passingPercentage: 70,
+          questions: quizData.questions
+        });
+        results.quizzesCreated++;
+        if (log) console.log(`[SEED] Created German Quiz for: "${lessonDoc.title}" (${quizData.questions.length} questions)`);
+      } else {
+        existingQuiz.questions = quizData.questions;
+        existingQuiz.passingPercentage = 70;
+        await existingQuiz.save();
         results.quizzesPreserved++;
       }
     }
