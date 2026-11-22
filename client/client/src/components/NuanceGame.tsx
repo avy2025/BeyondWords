@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -6,14 +6,15 @@ import { CheckCircle2, XCircle, Trophy, ArrowRight, RefreshCcw, Loader2 } from "
 import { useAuth } from "@/hooks/use-auth";
 
 interface Question {
-  idiom: string;
-  origin: string;
+  _id?: string;
+  idiom?: string;
+  origin?: string;
+  prompt?: string;
   options: string[];
-  correct: number;
-  nuance: string;
+  nuance?: string;
 }
 
-interface Quiz {
+interface SanitizedQuiz {
   _id: string;
   lessonId: string;
   questions: Question[];
@@ -27,47 +28,90 @@ export const NuanceGame = ({
   onComplete?: () => void 
 }) => {
   const { token, updateProgress } = useAuth();
-  const [quiz, setQuiz] = useState<Quiz | null>(null);
+  const [quiz, setQuiz] = useState<SanitizedQuiz | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [currentIdx, setCurrentIdx] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
   const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
+  const [verifiedCorrectIndex, setVerifiedCorrectIndex] = useState<number | null>(null);
+  const [verifiedNuance, setVerifiedNuance] = useState<string | null>(null);
   const [score, setScore] = useState(0);
   const [gameState, setGameState] = useState<"loading" | "playing" | "result">("loading");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const idempotencyKeyRef = useRef<string>(`nuance_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
 
-  useEffect(() => {
-    const fetchQuiz = async () => {
-      try {
-        const res = await fetch(`http://localhost:5000/api/learning/quiz/${lessonId}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setQuiz(data);
-          setGameState("playing");
-        } else {
-          console.error("Quiz not found");
-          onComplete?.();
-        }
-      } catch (err) {
-        console.error("Failed to fetch quiz:", err);
+  const initSession = async () => {
+    try {
+      setGameState("loading");
+      const res = await fetch(`http://localhost:5000/api/learning/nuance/session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ lessonId })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setQuiz(data.quiz);
+        setSessionId(data.sessionId);
+        setGameState("playing");
+      } else {
+        console.error("Failed to start nuance session");
         onComplete?.();
       }
-    };
+    } catch (err) {
+      console.error("Error initiating session:", err);
+      onComplete?.();
+    }
+  };
 
-    if (token && lessonId) fetchQuiz();
-  }, [token, lessonId, onComplete]);
+  useEffect(() => {
+    if (token && lessonId) {
+      initSession();
+    }
+  }, [token, lessonId]);
 
   const challenge = quiz?.questions[currentIdx];
 
-  const handleSelect = (idx: number) => {
-    if (selected !== null) return;
-    setSelected(idx);
-    const correct = idx === challenge?.correct;
-    setIsCorrect(correct);
-    if (correct) setScore(s => s + 1);
+  const handleSelect = async (idx: number) => {
+    if (selected !== null || isVerifying || !sessionId) return;
+    setIsVerifying(true);
+
+    try {
+      // Server-authoritative step verification
+      const res = await fetch(`http://localhost:5000/api/learning/nuance/verify-step`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          sessionId,
+          questionIndex: currentIdx,
+          selectedOptionIndex: idx
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setSelected(idx);
+        setIsCorrect(data.isCorrect);
+        setVerifiedCorrectIndex(data.correctIndex);
+        setVerifiedNuance(data.nuance);
+        if (data.isCorrect) {
+          setScore(s => s + 1);
+        }
+      } else {
+        console.error("Step verification error");
+      }
+    } catch (err) {
+      console.error("Error verifying answer:", err);
+    } finally {
+      setIsVerifying(false);
+    }
   };
 
   const nextStep = async () => {
@@ -77,11 +121,39 @@ export const NuanceGame = ({
       setCurrentIdx(currentIdx + 1);
       setSelected(null);
       setIsCorrect(null);
+      setVerifiedCorrectIndex(null);
+      setVerifiedNuance(null);
     } else {
       setIsSubmitting(true);
-      await updateProgress(lessonId, score, quiz.questions.length);
-      setIsSubmitting(false);
-      setGameState("result");
+      try {
+        // Authoritative final submission via session
+        const res = await fetch(`http://localhost:5000/api/learning/quiz/${lessonId}/submit`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            lessonId,
+            sessionId,
+            idempotencyKey: idempotencyKeyRef.current
+          })
+        });
+
+        if (res.ok) {
+          const finalResult = await res.json();
+          setScore(finalResult.score);
+        } else {
+          // Fallback to legacy complete handler if submit fails
+          await updateProgress(lessonId, score, quiz.questions.length);
+        }
+      } catch (e) {
+        console.error("Assessment submit error:", e);
+        await updateProgress(lessonId, score, quiz.questions.length);
+      } finally {
+        setIsSubmitting(false);
+        setGameState("result");
+      }
     }
   };
 
@@ -89,8 +161,11 @@ export const NuanceGame = ({
     setCurrentIdx(0);
     setSelected(null);
     setIsCorrect(null);
+    setVerifiedCorrectIndex(null);
+    setVerifiedNuance(null);
     setScore(0);
-    setGameState("playing");
+    idempotencyKeyRef.current = `nuance_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    initSession();
   };
 
   if (gameState === "loading") {
@@ -143,16 +218,16 @@ export const NuanceGame = ({
         </div>
         
         <div className="flex flex-col gap-4 relative z-10">
-          <span className="text-[#685d4a] text-sm font-medium italic opacity-70">— FROM THE {challenge.origin.toUpperCase()}</span>
+          <span className="text-[#685d4a] text-sm font-medium italic opacity-70">— FROM THE {(challenge.origin || 'PHILOSOPHY').toUpperCase()}</span>
           <h3 className="text-[#102c26] text-3xl font-bold tracking-tight leading-tight italic">
-            &ldquo;{challenge.idiom}&rdquo;
+            &ldquo;{challenge.idiom || challenge.prompt}&rdquo;
           </h3>
         </div>
 
         <div className="grid grid-cols-1 gap-3 content-stretch">
           {challenge.options.map((opt, i) => {
             const isSelected = selected === i;
-            const isCorrectOption = i === challenge.correct;
+            const isCorrectOption = verifiedCorrectIndex !== null && i === verifiedCorrectIndex;
             let statusClass = "bg-[#f5f3ef] text-[#414846] border-transparent";
             
             if (selected !== null) {
@@ -164,9 +239,10 @@ export const NuanceGame = ({
             return (
               <motion.button
                 key={i}
-                whileHover={selected === null ? { x: 8, backgroundColor: "#f0ede8" } : {}}
+                disabled={isVerifying}
+                whileHover={selected === null && !isVerifying ? { x: 8, backgroundColor: "#f0ede8" } : {}}
                 onClick={() => handleSelect(i)}
-                className={`flex items-center justify-between p-6 rounded-2xl border text-left transition-all ${statusClass} ${selected === null ? "cursor-pointer" : "cursor-default"}`}
+                className={`flex items-center justify-between p-6 rounded-2xl border text-left transition-all ${statusClass} ${selected === null && !isVerifying ? "cursor-pointer" : "cursor-default"}`}
               >
                 <span className="font-bold text-base tracking-tight">{opt}</span>
                 {selected !== null && isCorrectOption && <CheckCircle2 className="w-6 h-6 text-green-600" />}
@@ -187,7 +263,9 @@ export const NuanceGame = ({
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-[10px] font-bold tracking-widest uppercase opacity-70">EDITORIAL NUANCE</span>
                 </div>
-                <p className="text-sm leading-relaxed italic opacity-90">{challenge.nuance}</p>
+                <p className="text-sm leading-relaxed italic opacity-90">
+                  {verifiedNuance || challenge.nuance || "Nuance verified."}
+                </p>
               </div>
               <Button 
                 onClick={nextStep}

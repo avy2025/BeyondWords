@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "node src/server.js",
-    "test": "node --test test/phase1b.test.js",
+    "test": "node --test test/phase1b.test.js test/phase2.test.js",
     "seed": "node seed.js",
     "migrate:progress": "node src/migrations/migrateHistoricalProgress.js"
   },
