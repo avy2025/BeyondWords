@@ -25,6 +25,27 @@ export const getRank = (xp) => {
   return 'Polyglot Sage';
 };
 
+export const isLevelUnlocked = async (user, lesson) => {
+  if (!lesson || !lesson.level || lesson.level <= 1) return true;
+  if (!lesson.academy) return true;
+
+  // Prerequisite level is level - 1 in the same academy
+  const prereqLesson = await Lesson.findOne({
+    academy: lesson.academy,
+    level: lesson.level - 1
+  });
+  if (!prereqLesson) return true;
+
+  const account = await Account.findById(user._id || user);
+  if (!account || !account.completedLessons) return false;
+
+  const completed = account.completedLessons.find(
+    cl => cl.lessonId.toString() === prereqLesson._id.toString()
+  );
+  if (!completed) return false;
+  return completed.status === 'PASSED';
+};
+
 export const checkAndAwardAchievements = (user, lessonResult) => {
   const newAchievements = [];
   const existingTitles = user.achievements.map(a => a.title);
@@ -72,7 +93,7 @@ export const checkAndAwardAchievements = (user, lessonResult) => {
   return false;
 };
 
-// @desc    Get all lessons for a language or academy
+// @desc    Get all lessons for a language or academy with user unlock state
 // @route   GET /api/learning/lessons
 // @access  Private
 router.get('/lessons', protect, async (req, res) => {
@@ -83,8 +104,71 @@ router.get('/lessons', protect, async (req, res) => {
     if (language) filter.language = language;
     else if (!academy) filter.language = 'German';
 
-    const lessons = await Lesson.find(filter).sort({ order: 1 });
-    res.json(lessons);
+    const lessons = await Lesson.find(filter).sort({ level: 1, order: 1 }).lean();
+
+    // Enrich with user's unlock state and progress
+    const user = await Account.findById(req.user._id).lean();
+    const completedMap = new Map();
+    (user?.completedLessons || []).forEach(cl => {
+      completedMap.set(cl.lessonId.toString(), cl);
+    });
+
+    const enriched = lessons.map(lesson => {
+      const lessonIdStr = lesson._id.toString();
+      const progress = completedMap.get(lessonIdStr) || null;
+      const isPassed = progress && progress.status === 'PASSED';
+
+      let isUnlocked = true;
+      if (lesson.academy && lesson.level > 1) {
+        const prereqLesson = lessons.find(l => l.academy === lesson.academy && l.level === lesson.level - 1);
+        if (prereqLesson) {
+          const prereqProgress = completedMap.get(prereqLesson._id.toString());
+          isUnlocked = prereqProgress && prereqProgress.status === 'PASSED';
+        } else {
+          isUnlocked = true;
+        }
+      }
+
+      return {
+        ...lesson,
+        isUnlocked: !!isUnlocked,
+        userProgress: progress ? {
+          status: progress.status,
+          score: progress.score,
+          bestScore: progress.bestScore || progress.score,
+          attemptsCount: progress.attemptsCount || 1,
+          completedAt: progress.completedAt,
+          isPassed: !!isPassed
+        } : null
+      };
+    });
+
+    res.json(enriched);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @desc    Get full lesson content (all stages) for an unlocked level
+// @route   GET /api/learning/lesson/:lessonId
+// @access  Private
+router.get('/lesson/:lessonId', protect, async (req, res) => {
+  const { lessonId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(lessonId)) {
+    return res.status(400).json({ message: 'Invalid lesson ID' });
+  }
+
+  try {
+    const lesson = await Lesson.findById(lessonId);
+    if (!lesson) return res.status(404).json({ message: 'Lesson not found' });
+
+    const unlocked = await isLevelUnlocked(req.user, lesson);
+    if (!unlocked) {
+      return res.status(403).json({ message: `Level ${lesson.level} is locked. Complete Level ${lesson.level - 1} first.` });
+    }
+
+    res.json(lesson);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -101,6 +185,14 @@ router.get('/quiz/:lessonId', protect, async (req, res) => {
   }
 
   try {
+    const lesson = await Lesson.findById(lessonId);
+    if (!lesson) return res.status(404).json({ message: 'Lesson not found' });
+
+    const unlocked = await isLevelUnlocked(req.user, lesson);
+    if (!unlocked) {
+      return res.status(403).json({ message: `Assessment for Level ${lesson.level} is locked. Complete Level ${lesson.level - 1} first.` });
+    }
+
     const quiz = await Quiz.findOne({ lessonId });
     if (!quiz) return res.status(404).json({ message: 'Quiz not found' });
 
@@ -276,6 +368,12 @@ router.post(['/assessment/submit', '/quiz/:lessonId/submit'], protect, assessmen
     const lesson = await Lesson.findById(lessonId);
     if (!lesson) return res.status(404).json({ message: 'Lesson not found' });
 
+    // Prerequisite check: ensure previous level was passed
+    const unlocked = await isLevelUnlocked(req.user, lesson);
+    if (!unlocked) {
+      return res.status(403).json({ message: `Prerequisite Level ${lesson.level - 1} must be completed before taking this assessment.` });
+    }
+
     // 2. Prepare submitted answers
     // If sessionId was provided (Nuance Game session), reconstruct answers from session
     let answersToGrade = answers;
@@ -324,8 +422,8 @@ router.post(['/assessment/submit', '/quiz/:lessonId/submit'], protect, assessmen
     // 6. Award XP via atomic xpService (First-pass XP awarded ONLY ONCE)
     let xpGained = 0;
     if (gradeResult.passed) {
-      const baseXP = 100;
-      const scoreBonus = gradeResult.maxScore > 0 ? Math.floor((gradeResult.rawScore / gradeResult.maxScore) * 100) : 0;
+      const baseXP = lesson.xpReward || 100;
+      const scoreBonus = gradeResult.maxScore > 0 ? Math.floor((gradeResult.rawScore / gradeResult.maxScore) * (lesson.xpReward ? Math.floor(lesson.xpReward * 0.2) : 50)) : 0;
       const eligibleXp = baseXP + scoreBonus;
 
       const xpResult = await awardFirstPassXp({

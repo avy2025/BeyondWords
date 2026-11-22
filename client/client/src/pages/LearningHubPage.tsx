@@ -53,12 +53,13 @@ export const LearningHubPage = () => {
   const [showAchievements, setShowAchievements] = useState(false);
   const [signLanguageLanguage, setSignLanguageLanguage] = useState<'en' | 'de'>('en');
   const [completedSignLanguageLessons, setCompletedSignLanguageLessons] = useState<string[]>([]);
-  const [completedGermanLessons, setCompletedGermanLessons] = useState<string[]>([]);
+  const [germanCompletedCount, setGermanCompletedCount] = useState<number>(0);
+  const [germanEarnedXp, setGermanEarnedXp] = useState<number>(0);
 
   useEffect(() => {
     const fetchLessons = async () => {
       try {
-        const res = await fetch('http://localhost:5000/api/learning/lessons', {
+        const res = await fetch('http://localhost:5000/api/learning/lessons?academy=NUANCE_GAME', {
           headers: {
             'Authorization': `Bearer ${token}`
           }
@@ -74,8 +75,28 @@ export const LearningHubPage = () => {
       }
     };
 
+    const fetchGermanStats = async () => {
+      try {
+        const res = await fetch('http://localhost:5000/api/learning/lessons?academy=GERMAN', {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        if (res.ok) {
+          const germanLevels = await res.json();
+          const passed = germanLevels.filter((lvl: any) => lvl.userProgress?.isPassed);
+          setGermanCompletedCount(passed.length);
+          const xp = passed.reduce((sum: number, lvl: any) => sum + (lvl.xpReward || 100), 0);
+          setGermanEarnedXp(xp);
+        }
+      } catch (err) {
+        console.error("Failed to fetch German progress:", err);
+      }
+    };
+
     if (token) {
       fetchLessons();
+      fetchGermanStats();
     } else {
       setIsLoading(false);
     }
@@ -284,6 +305,16 @@ export const LearningHubPage = () => {
             {/* Grid */}
             {activeTab === 'SIGN_LANGUAGE' ? (
               <section className="pb-32">
+                <div className="mb-6 p-4 bg-purple-50 border border-purple-200 rounded-2xl flex items-center justify-between">
+                  <div>
+                    <span className="text-xs uppercase font-bold text-purple-700 tracking-wider">PHASE 4 PREVIEW</span>
+                    <h3 className="font-bold text-purple-950 text-base">Sign Language Academy</h3>
+                    <p className="text-xs text-purple-800">Camera-based inference and gesture tracking will be fully unlocked in Phase 4.</p>
+                  </div>
+                  <Badge variant="outline" className="bg-white border-purple-300 text-purple-700 font-bold">
+                    Coming in Phase 4
+                  </Badge>
+                </div>
                 <SignLanguageLearning 
                   language={signLanguageLanguage} 
                   onLessonComplete={handleSignLanguageLessonComplete}
@@ -297,23 +328,119 @@ export const LearningHubPage = () => {
               </section>
             ) : (
               <>
+                {/* Learning Academies Track Cards on ALL tab */}
+                {activeTab === 'ALL' && (
+                  <section className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    {/* German Academy Card */}
+                    <Card className="bg-gradient-to-br from-emerald-900 to-[#102c26] text-white border-none shadow-md rounded-2xl p-6 flex flex-col justify-between">
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-3xl">🇩🇪</span>
+                          <Badge className="bg-[#eddec5] text-[#102c26] text-[10px] font-bold">
+                            CEFR A1 • 10 LEVELS
+                          </Badge>
+                        </div>
+                        <h3 className="font-bold text-xl text-white">German Academy</h3>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          Structured beginner progression with 5 learning stages per level and server-graded assessments.
+                        </p>
+                      </div>
+                      <div className="pt-6 mt-auto space-y-3">
+                        <div className="flex justify-between items-center text-xs text-[#eddec5] font-bold">
+                          <span>{germanCompletedCount} / 10 Levels Completed</span>
+                          <span>+{germanEarnedXp} XP</span>
+                        </div>
+                        <Button
+                          onClick={() => setActiveTab('GERMAN')}
+                          className="w-full bg-[#eddec5] hover:bg-white text-[#102c26] font-bold text-xs rounded-xl h-10 flex items-center justify-center gap-1.5"
+                        >
+                          <span>Open German Academy</span>
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                    </Card>
+
+                    {/* Nuance Game Card */}
+                    <Card className="bg-gradient-to-br from-amber-900/90 to-amber-950 text-white border-none shadow-md rounded-2xl p-6 flex flex-col justify-between">
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-3xl">🎭</span>
+                          <Badge className="bg-amber-200 text-amber-950 text-[10px] font-bold">
+                            CULTURAL NUANCE
+                          </Badge>
+                        </div>
+                        <h3 className="font-bold text-xl text-white">Nuance Game</h3>
+                        <p className="text-xs text-amber-200/80 leading-relaxed">
+                          Discover cultural idioms, dialectal essence, and contextual subtext in interactive scenarios.
+                        </p>
+                      </div>
+                      <div className="pt-6 mt-auto space-y-3">
+                        <div className="flex justify-between items-center text-xs text-amber-200 font-bold">
+                          <span>{lessons.filter(l => user?.completedLessons?.some(cl => cl.lessonId === l._id)).length} / {lessons.length} Modules</span>
+                          <span>Philology</span>
+                        </div>
+                        <Button
+                          onClick={() => {
+                            if (lessons.length > 0) handleStartLesson(lessons[0]._id);
+                          }}
+                          className="w-full bg-amber-200 hover:bg-white text-amber-950 font-bold text-xs rounded-xl h-10 flex items-center justify-center gap-1.5"
+                        >
+                          <span>Play Nuance Game</span>
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                    </Card>
+
+                    {/* Sign Language Academy Card */}
+                    <Card className="bg-gradient-to-br from-purple-900 to-indigo-950 text-white border-none shadow-md rounded-2xl p-6 flex flex-col justify-between">
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-3xl">🖐️</span>
+                          <Badge className="bg-purple-200 text-purple-950 text-[10px] font-bold">
+                            PHASE 4 PREVIEW
+                          </Badge>
+                        </div>
+                        <h3 className="font-bold text-xl text-white">Sign Language</h3>
+                        <p className="text-xs text-purple-200/80 leading-relaxed">
+                          Interactive hand gesture recognition and multimodal practice. Full service integration in Phase 4.
+                        </p>
+                      </div>
+                      <div className="pt-6 mt-auto space-y-3">
+                        <div className="flex justify-between items-center text-xs text-purple-200 font-bold">
+                          <span>Interactive Preview</span>
+                          <span>Webcam Ready</span>
+                        </div>
+                        <Button
+                          onClick={() => setActiveTab('SIGN_LANGUAGE')}
+                          className="w-full bg-purple-200 hover:bg-white text-purple-950 font-bold text-xs rounded-xl h-10 flex items-center justify-center gap-1.5"
+                        >
+                          <span>Preview Academy</span>
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                    </Card>
+                  </section>
+                )}
+
                 {/* Progress Summary from All Modules */}
                 {(activeTab === 'PROGRESS' || activeTab === 'CHALLENGES') && (
                   <section className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
                     <Card className="bg-gradient-to-br from-blue-50 to-blue-100 border-blue-200">
                       <CardContent className="p-6">
                         <div className="text-3xl mb-2">📚</div>
-                        <h3 className="font-bold text-[#102c26] mb-1">Language Lessons</h3>
-                        <p className="text-sm text-slate-600 mb-3">Interactive grammar & vocabulary</p>
-                        <span className="font-bold text-blue-600">{completedGermanLessons.length} / 10 Completed</span>
+                        <h3 className="font-bold text-[#102c26] mb-1">German Academy</h3>
+                        <p className="text-sm text-slate-600 mb-3">CEFR A1 progression</p>
+                        <span className="font-bold text-blue-600">{germanCompletedCount} / 10 Completed</span>
                       </CardContent>
                     </Card>
-                    <Card className="bg-gradient-to-br from-purple-50 to-purple-100 border-purple-200">
+                    <Card className="bg-gradient-to-br from-amber-50 to-amber-100 border-amber-200">
                       <CardContent className="p-6">
-                        <div className="text-3xl mb-2">🖐️</div>
-                        <h3 className="font-bold text-[#102c26] mb-1">Sign Language</h3>
-                        <p className="text-sm text-slate-600 mb-3">Hand gestures & recognition</p>
-                        <span className="font-bold text-purple-600">{completedSignLanguageLessons.length} / 7 Completed</span>
+                        <div className="text-3xl mb-2">🎭</div>
+                        <h3 className="font-bold text-[#102c26] mb-1">Nuance Game</h3>
+                        <p className="text-sm text-slate-600 mb-3">Cultural context tests</p>
+                        <span className="font-bold text-amber-700">
+                          {lessons.filter(l => user?.completedLessons?.some(cl => cl.lessonId === l._id)).length} / {lessons.length} Completed
+                        </span>
                       </CardContent>
                     </Card>
                     <Card className="bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-200">
@@ -321,7 +448,9 @@ export const LearningHubPage = () => {
                         <div className="text-3xl mb-2">🌍</div>
                         <h3 className="font-bold text-[#102c26] mb-1">Overall Progress</h3>
                         <p className="text-sm text-slate-600 mb-3">All modules combined</p>
-                        <span className="font-bold text-emerald-600">{completedGermanLessons.length + completedSignLanguageLessons.length} / 17 Completed</span>
+                        <span className="font-bold text-emerald-600">
+                          {germanCompletedCount + lessons.filter(l => user?.completedLessons?.some(cl => cl.lessonId === l._id)).length} / {10 + lessons.length} Completed
+                        </span>
                       </CardContent>
                     </Card>
                   </section>
