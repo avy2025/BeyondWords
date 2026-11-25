@@ -147,6 +147,29 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+The German Academy and Nuance Game lessons are stored in MongoDB. Seed them once
+before starting the app (safe to re-run; existing records are retained):
+```bash
+npm --prefix server run seed
+```
+
+### Phase 4 — ASL Academy
+
+The ASL Academy is a ten-level path from the A–Z alphabet to guided conversations.
+Every level has five stages (Learn, Guided Practice, Practice Challenge, Revision,
+Final Assessment). Stages unlock in order on the server, and final assessments use
+the existing authoritative grading and exactly-once XP ledger.
+
+- Open it from the Learning Hub card or directly at `http://localhost:5173/asl-academy`.
+- Level 1 includes all 26 letters with written handshape, recognition cues, common
+  mistakes and links to verified visual references from ASL University. J and Z
+  are explicitly taught as movement letters.
+- Camera recognition is intentionally **not** used by this academy: the bundled
+  model does not support all 26 letters. Exercises are visual/interactive, so no
+  webcam is required. The separate Gesture Lab tab retains the existing camera demo.
+- Seeding is insert-only for ASL content, so existing lessons, IDs and learner
+  progress are preserved. Re-running `npm --prefix server run seed` is safe.
+
 ### 2. Run the Platform
 **macOS / Linux (from the repository root):**
 ```bash
@@ -168,6 +191,10 @@ are not included in the repository.
 - **Server**: `cd server && npm run dev` (Port 5000)
 - **Client**: `cd client && npm run dev` (Port 5173 / 3000)
 - **Python ML Server**: `cd python_bridge && python sign_ws_server.py` (Port 8765)
+
+The API accepts both Vite defaults (`5173`) and the alternate local port `3000`.
+The sign-language service remains on `8765`; set `VITE_SIGN_LANGUAGE_WS_URL` in
+`client/client/.env` only if you intentionally move it.
 
 To collect sign-language training data, train the model, or run local webcam
 detection on macOS/Linux, set up the Python environment above and run:
