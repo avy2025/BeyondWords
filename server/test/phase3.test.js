@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import { germanLessons, germanQuizzes } from '../src/seeds/germanCurriculum.js';
-import { legacyNuanceLessons, legacyNuanceQuizzes } from '../seed.js';
+import { aslLessons, aslQuizzes } from '../src/seeds/aslCurriculum.js';
+import { legacyNuanceLessons, legacyNuanceQuizzes, seedDB } from '../seed.js';
 import { isLevelUnlocked } from '../src/routes/learningRoutes.js';
 import { sanitizeQuiz } from '../src/utils/quizSanitizer.js';
 import { gradeQuiz } from '../src/services/gradingService.js';
@@ -32,6 +33,7 @@ test('1. All 10 German levels exist with correct metadata and CEFR A1 progressio
     const doc = new Lesson(lvl);
     const err = doc.validateSync();
     assert.equal(err, undefined, `Lesson schema validation error on Level ${expectedLevel}: ${err?.message}`);
+    assert.equal(doc.xpReward, lvl.xpReward, `Level ${expectedLevel} must persist its XP reward`);
   }
 });
 
@@ -265,4 +267,97 @@ test('11. Existing Nuance Game lessons, quizzes, and legacy data remain 100% int
     assert.equal(nl.stableKey, expectedNuanceKeys[i]);
     assert.equal(nl.academy, "NUANCE_GAME");
   });
+});
+
+test('12. Safe seed populates German, ASL and Nuance curricula and is idempotent', async () => {
+  const lessonRecords = new Map();
+  const quizzesByLesson = new Map();
+  const originalLessonFindOne = Lesson.findOne;
+  const originalLessonFind = Lesson.find;
+  const originalLessonCreate = Lesson.create;
+  const originalQuizFindOne = Quiz.findOne;
+  const originalQuizCreate = Quiz.create;
+
+  Lesson.findOne = async ({ stableKey }) => lessonRecords.get(stableKey) || null;
+  Lesson.find = async query => [...lessonRecords.values()].filter(lesson =>
+    Object.entries(query).every(([key, value]) => lesson[key] === value)
+  );
+  Lesson.create = async lesson => {
+    const record = {
+      ...lesson,
+      _id: new mongoose.Types.ObjectId(),
+      async save() {}
+    };
+    lessonRecords.set(record.stableKey, record);
+    return record;
+  };
+  Quiz.findOne = async ({ lessonId }) => quizzesByLesson.get(String(lessonId)) || null;
+  Quiz.create = async quiz => {
+    const record = {
+      ...quiz,
+      _id: new mongoose.Types.ObjectId(),
+      async save() {}
+    };
+    quizzesByLesson.set(String(record.lessonId), record);
+    return record;
+  };
+
+  try {
+    const firstSeed = await seedDB({ log: false });
+    const seededGermanLessons = [...lessonRecords.values()]
+      .filter(lesson => lesson.academy === 'GERMAN')
+      .sort((a, b) => a.level - b.level);
+    const seededAslLessons = [...lessonRecords.values()]
+      .filter(lesson => lesson.academy === 'SIGN_LANGUAGE')
+      .sort((a, b) => a.level - b.level);
+
+    assert.equal(seededGermanLessons.length, germanLessons.length);
+    assert.deepEqual(
+      seededGermanLessons.map(lesson => lesson.stableKey),
+      germanLessons.map(lesson => lesson.stableKey)
+    );
+    assert.equal(seededAslLessons.length, aslLessons.length);
+    assert.deepEqual(
+      seededAslLessons.map(lesson => lesson.stableKey),
+      aslLessons.map(lesson => lesson.stableKey)
+    );
+    assert.ok([...seededGermanLessons, ...seededAslLessons].every(lesson => lesson.contentBlocks?.length));
+    assert.ok([...seededGermanLessons, ...seededAslLessons].every(lesson => quizzesByLesson.has(String(lesson._id))));
+    const seededRecordCount = germanLessons.length + aslLessons.length + legacyNuanceLessons.length;
+    assert.equal(firstSeed.lessonsCreated, seededRecordCount);
+    assert.equal(firstSeed.quizzesCreated, seededRecordCount);
+
+    const nuanceLesson = lessonRecords.get('nuance_idioms_1');
+    nuanceLesson.title = 'Editorially revised Nuance lesson';
+    const nuanceQuiz = quizzesByLesson.get(String(nuanceLesson._id));
+    nuanceQuiz.questions = [{ prompt: 'Editorially revised Nuance quiz' }];
+    const aslLesson = lessonRecords.get('asl_level_01');
+    aslLesson.title = 'Editorially revised ASL lesson';
+    const aslQuiz = quizzesByLesson.get(String(aslLesson._id));
+    aslQuiz.questions = [{ prompt: 'Editorially revised ASL quiz' }];
+
+    const secondSeed = await seedDB({ log: false });
+    assert.equal(lessonRecords.size, seededRecordCount);
+    assert.equal(quizzesByLesson.size, seededRecordCount);
+    assert.equal(secondSeed.lessonsCreated, 0);
+    assert.equal(secondSeed.quizzesCreated, 0);
+    assert.equal(nuanceLesson.title, 'Editorially revised Nuance lesson');
+    assert.deepEqual(nuanceQuiz.questions, [{ prompt: 'Editorially revised Nuance quiz' }]);
+    assert.equal(aslLesson.title, 'Editorially revised ASL lesson');
+    assert.deepEqual(aslQuiz.questions, [{ prompt: 'Editorially revised ASL quiz' }]);
+    assert.deepEqual(
+      [...lessonRecords.values()].filter(lesson => lesson.academy === 'NUANCE_GAME').map(lesson => lesson.stableKey),
+      legacyNuanceLessons.map(lesson => lesson.stableKey)
+    );
+    assert.deepEqual(
+      [...lessonRecords.values()].filter(lesson => lesson.academy === 'SIGN_LANGUAGE').map(lesson => lesson.stableKey),
+      aslLessons.map(lesson => lesson.stableKey)
+    );
+  } finally {
+    Lesson.findOne = originalLessonFindOne;
+    Lesson.find = originalLessonFind;
+    Lesson.create = originalLessonCreate;
+    Quiz.findOne = originalQuizFindOne;
+    Quiz.create = originalQuizCreate;
+  }
 });

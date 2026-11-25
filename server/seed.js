@@ -3,6 +3,12 @@ import dotenv from 'dotenv';
 import Lesson from './src/models/Lesson.js';
 import Quiz from './src/models/Quiz.js';
 import { germanLessons, germanQuizzes } from './src/seeds/germanCurriculum.js';
+import { aslLessons, aslQuizzes } from './src/seeds/aslCurriculum.js';
+import {
+  aslPhase42Lessons,
+  aslPhase42Quizzes,
+  aslPhase42BaseExplanations
+} from './src/seeds/aslPhase42Curriculum.js';
 
 dotenv.config();
 
@@ -169,7 +175,10 @@ export async function seedDB({ log = true } = {}) {
     lessonsUpdated: 0,
     lessonsPreserved: 0,
     quizzesCreated: 0,
-    quizzesPreserved: 0
+    quizzesPreserved: 0,
+    aslEnrichmentBlocksAdded: 0,
+    aslEnrichmentQuestionsAdded: 0,
+    aslExplanationsImproved: 0
   };
 
   for (let i = 0; i < legacyNuanceLessons.length; i++) {
@@ -277,6 +286,160 @@ export async function seedDB({ log = true } = {}) {
         await existingQuiz.save();
         results.quizzesPreserved++;
       }
+    }
+  }
+
+  // 7. ASL Academy Curriculum (Levels 1 - 10), insert-only to preserve editorial work and IDs
+  for (let i = 0; i < aslLessons.length; i++) {
+    const item = aslLessons[i];
+    let lessonDoc = await Lesson.findOne({ stableKey: item.stableKey });
+
+    if (!lessonDoc) {
+      lessonDoc = await Lesson.create(item);
+      results.lessonsCreated++;
+      if (log) console.log(`[SEED] Created ASL Academy lesson: "${lessonDoc.title}" (${item.stableKey})`);
+    } else {
+      results.lessonsPreserved++;
+    }
+
+    const quizData = aslQuizzes[i];
+    const existingQuiz = await Quiz.findOne({ lessonId: lessonDoc._id });
+    if (!existingQuiz) {
+      await Quiz.create({
+        lessonId: lessonDoc._id,
+        passingPercentage: 70,
+        questions: quizData.questions
+      });
+      results.quizzesCreated++;
+      if (log) console.log(`[SEED] Created ASL Quiz for: "${lessonDoc.title}"`);
+    } else {
+      results.quizzesPreserved++;
+    }
+  }
+
+  // 8. Phase 4.1: backfill only missing alphabet-classroom fields on the
+  // existing Level 1 lesson. Editorial text, IDs, progress, and quiz data stay
+  // untouched; a missing visual notice is restored as an honest placeholder.
+  const alphabetTemplate = aslLessons[0]?.contentBlocks?.find(block => block.type === 'GESTURE_GUIDE');
+  const existingLevelOne = alphabetTemplate
+    ? await Lesson.findOne({ stableKey: 'asl_level_01' })
+    : null;
+  const existingGuide = existingLevelOne?.contentBlocks?.find(block => block.type === 'GESTURE_GUIDE');
+  if (existingGuide) {
+    let guideChanged = false;
+    const templateData = alphabetTemplate.data;
+
+    for (const canonicalLetter of templateData.letters || []) {
+      const existingLetter = (existingGuide.data?.letters || []).find(
+        letter => letter.letter === canonicalLetter.letter
+      );
+      if (!existingLetter) continue;
+      for (const field of ['orientation', 'movement', 'tip']) {
+        const value = existingLetter[field];
+        if (value === undefined || value === null || value === '') {
+          existingLetter[field] = canonicalLetter[field];
+          guideChanged = true;
+        }
+      }
+    }
+
+    if (!existingGuide.data?.visualNotice && templateData.visualNotice) {
+      existingGuide.data.visualNotice = templateData.visualNotice;
+      guideChanged = true;
+    }
+
+    if (guideChanged) {
+      existingLevelOne.markModified?.('contentBlocks');
+      await existingLevelOne.save();
+      results.lessonsUpdated++;
+      if (log) console.log('[SEED] Backfilled missing ASL Level 1 alphabet fields without overwriting editorial values.');
+    }
+  }
+
+  // 9. Phase 4.2: additive ASL enrichment. Only append blocks/questions whose
+  // stable key or prompt is missing. Existing IDs, editorial text, quiz answer
+  // keys, account progress, and German/Nuance data are not touched.
+  for (const enrichment of aslPhase42Lessons) {
+    const lessonDoc = await Lesson.findOne({ stableKey: enrichment.stableKey });
+    if (!lessonDoc) continue;
+
+    const contentBlocks = Array.isArray(lessonDoc.contentBlocks) ? [...lessonDoc.contentBlocks] : [];
+    const canonicalPairs = [
+      ['LEARN', 'CONCEPT_INTRO'],
+      ['LEARN', 'EXPLANATION'],
+      ['GUIDED_PRACTICE', 'FORMATIVE_DRILL'],
+      ['PRACTICE_CHALLENGE', 'PRACTICE_DRILL'],
+      ['REVISION', 'REVISION_RECAP']
+    ];
+    const isCanonicalLesson = canonicalPairs.every(([stage, type]) =>
+      contentBlocks.some(block => block?.data?.stage === stage && block?.type === type)
+    );
+    if (!isCanonicalLesson) {
+      // Do not enrich a lesson whose original teaching structure was replaced.
+      continue;
+    }
+    let lessonChanged = false;
+
+    for (const block of enrichment.contentBlocks) {
+      const enrichmentKey = block.data?.enrichmentKey;
+      const alreadyPresent = contentBlocks.some(
+        existing => existing?.data?.enrichmentKey === enrichmentKey
+      );
+      if (alreadyPresent) continue;
+      contentBlocks.push(block);
+      lessonChanged = true;
+      results.aslEnrichmentBlocksAdded++;
+    }
+
+    if (lessonChanged) {
+      lessonDoc.contentBlocks = contentBlocks;
+      lessonDoc.markModified?.('contentBlocks');
+      await lessonDoc.save();
+      results.lessonsUpdated++;
+      if (log) console.log(`[SEED] Added Phase 4.2 enrichment to ASL ${enrichment.stableKey}.`);
+    }
+  }
+
+  for (const enrichment of aslPhase42Quizzes) {
+    const lessonDoc = await Lesson.findOne({ stableKey: enrichment.stableKey });
+    if (!lessonDoc) continue;
+    const quizDoc = await Quiz.findOne({ lessonId: lessonDoc._id });
+    if (!quizDoc) continue;
+
+    const questions = Array.isArray(quizDoc.questions) ? [...quizDoc.questions] : [];
+    const canonicalPrompts = (aslQuizzes.find(quiz => quiz.stableKey === enrichment.stableKey)?.questions || [])
+      .map(question => question.prompt);
+    const isCanonicalQuiz = canonicalPrompts.length > 0 &&
+      canonicalPrompts.every(prompt => questions.some(question => question?.prompt === prompt));
+    if (!isCanonicalQuiz) {
+      // An editorially revised quiz is left completely alone.
+      continue;
+    }
+    let quizChanged = false;
+
+    for (const question of enrichment.questions) {
+      if (questions.some(existing => existing?.prompt === question.prompt)) continue;
+      questions.push(question);
+      quizChanged = true;
+      results.aslEnrichmentQuestionsAdded++;
+    }
+
+    const explanationMap = aslPhase42BaseExplanations[enrichment.stableKey] || {};
+    for (const question of questions) {
+      const improved = explanationMap[question?.prompt];
+      if (!improved) continue;
+      const isGeneric = !question.explanation || /^Review Level \d+:/.test(question.explanation);
+      if (!isGeneric) continue;
+      question.explanation = improved;
+      quizChanged = true;
+      results.aslExplanationsImproved++;
+    }
+
+    if (quizChanged) {
+      quizDoc.questions = questions;
+      quizDoc.markModified?.('questions');
+      await quizDoc.save();
+      if (log) console.log(`[SEED] Added Phase 4.2 questions to ASL ${enrichment.stableKey}.`);
     }
   }
 

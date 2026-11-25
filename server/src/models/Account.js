@@ -18,6 +18,32 @@ const AccountSchema = new mongoose.Schema({
     bestScore: { type: Number },
     completedAt: { type: Date, default: Date.now }
   }],
+  lessonStageProgress: [{
+    lessonId: { type: mongoose.Schema.Types.ObjectId, ref: 'Lesson', required: true },
+    completedStages: [{
+      type: String,
+      enum: ['LEARN', 'GUIDED_PRACTICE', 'PRACTICE_CHALLENGE', 'REVISION']
+    }]
+  }],
+  // Practice-only progress for the ASL alphabet classroom. Never awards XP.
+  aslAlphabetProgress: [{
+    lessonId: { type: mongoose.Schema.Types.ObjectId, ref: 'Lesson', required: true },
+    studiedLetters: [{ type: String, match: /^[A-Z]$/ }],
+    completedActivities: [{
+      type: String,
+      enum: ['LETTER_IDENTIFICATION', 'ALPHABET_CHALLENGE', 'REVISION']
+    }],
+    challenge: {
+      attempts: { type: Number, default: 0 },
+      bestCorrect: { type: Number, default: 0 },
+      bestTotal: { type: Number, default: 0 },
+      lastCorrect: { type: Number, default: 0 },
+      lastTotal: { type: Number, default: 0 },
+      missedLetters: [{ type: String, match: /^[A-Z]$/ }],
+      updatedAt: { type: Date, default: Date.now }
+    },
+    updatedAt: { type: Date, default: Date.now }
+  }],
   achievements: [{
     title: { type: String, required: true },
     description: { type: String, required: true },

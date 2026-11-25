@@ -55,6 +55,10 @@ const LessonSchema = new mongoose.Schema({
     type: Number,
     index: true
   },
+  xpReward: {
+    type: Number,
+    min: 0
+  },
   lessonType: {
     type: String,
     enum: ['THEORY', 'PRACTICE', 'REVISION', 'ASSESSMENT'],

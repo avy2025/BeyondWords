@@ -10,6 +10,7 @@ import { protect } from '../middleware/authMiddleware.js';
 import { sanitizeQuiz } from '../utils/quizSanitizer.js';
 import { gradeQuiz, gradeQuestion, PASSING_THRESHOLD_PERCENT } from '../services/gradingService.js';
 import { awardFirstPassXp } from '../services/xpService.js';
+import XpGrantLedger from '../models/XpGrantLedger.js';
 import {
   stepVerificationLimiter,
   sessionCreationLimiter,
@@ -17,6 +18,131 @@ import {
 } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
+export const ASL_STAGES = ['LEARN', 'GUIDED_PRACTICE', 'PRACTICE_CHALLENGE', 'REVISION'];
+
+export const getCompletedStages = (account, lessonId) => {
+  const progress = account?.lessonStageProgress?.find(
+    item => item.lessonId.toString() === lessonId.toString()
+  );
+  return progress?.completedStages || [];
+};
+
+export const canCompleteAslStage = (completedStages, stage) => {
+  if (!ASL_STAGES.includes(stage)) return false;
+  return completedStages.includes(stage) || ASL_STAGES.indexOf(stage) === completedStages.length;
+};
+
+export const areAllAslStagesComplete = (account, lessonId) => {
+  const completedStages = getCompletedStages(account, lessonId);
+  return ASL_STAGES.every(stage => completedStages.includes(stage));
+};
+
+const ALPHABET_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+const ASL_ACTIVITIES = ['LETTER_IDENTIFICATION', 'ALPHABET_CHALLENGE', 'REVISION'];
+
+export const emptyAslAlphabetProgress = () => ({
+  studiedLetters: [],
+  completedActivities: [],
+  challenge: {
+    attempts: 0,
+    bestCorrect: 0,
+    bestTotal: 0,
+    lastCorrect: 0,
+    lastTotal: 0,
+    missedLetters: []
+  },
+  updatedAt: null
+});
+
+export const getAslAlphabetProgress = (account, lessonId) => {
+  const entry = account?.aslAlphabetProgress?.find(
+    item => item.lessonId.toString() === lessonId.toString()
+  );
+  if (!entry) return emptyAslAlphabetProgress();
+
+  return {
+    studiedLetters: ALPHABET_LETTERS.filter(letter => (entry.studiedLetters || []).includes(letter)),
+    completedActivities: ASL_ACTIVITIES.filter(activity => (entry.completedActivities || []).includes(activity)),
+    challenge: {
+      attempts: entry.challenge?.attempts || 0,
+      bestCorrect: entry.challenge?.bestCorrect || 0,
+      bestTotal: entry.challenge?.bestTotal || 0,
+      lastCorrect: entry.challenge?.lastCorrect || 0,
+      lastTotal: entry.challenge?.lastTotal || 0,
+      missedLetters: ALPHABET_LETTERS.filter(letter => (entry.challenge?.missedLetters || []).includes(letter))
+    },
+    updatedAt: entry.updatedAt || entry.challenge?.updatedAt || null
+  };
+};
+
+/**
+ * Validate and merge a practice-only alphabet progress update.
+ * Studied letters are additive, activity completion is monotonic, and the
+ * challenge best score can only improve. No XP or assessment state is touched.
+ */
+export const mergeAslAlphabetProgress = (existing, patch = {}) => {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new Error('INVALID_ALPHABET_PROGRESS');
+  }
+
+  const sanitizeLetters = value => {
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value) || value.some(letter => !ALPHABET_LETTERS.includes(letter))) {
+      throw new Error('INVALID_ALPHABET_LETTER');
+    }
+    return ALPHABET_LETTERS.filter(letter => value.includes(letter));
+  };
+
+  const sanitizeActivities = value => {
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value) || value.some(activity => !ASL_ACTIVITIES.includes(activity))) {
+      throw new Error('INVALID_ALPHABET_ACTIVITY');
+    }
+    return ASL_ACTIVITIES.filter(activity => value.includes(activity));
+  };
+
+  const studiedLetters = sanitizeLetters(patch.studiedLetters) || [];
+  const completedActivities = sanitizeActivities(patch.completedActivities) || [];
+  const current = existing && typeof existing === 'object' ? existing : emptyAslAlphabetProgress();
+  const currentChallenge = current.challenge || emptyAslAlphabetProgress().challenge;
+
+  const nextChallenge = { ...currentChallenge };
+  if (patch.challenge !== undefined) {
+    if (!patch.challenge || typeof patch.challenge !== 'object' || Array.isArray(patch.challenge)) {
+      throw new Error('INVALID_ALPHABET_CHALLENGE');
+    }
+    const { lastCorrect, lastTotal, missedLetters } = patch.challenge;
+    if (
+      typeof lastCorrect !== 'number' || !Number.isInteger(lastCorrect) ||
+      typeof lastTotal !== 'number' || !Number.isInteger(lastTotal) ||
+      lastTotal < 0 || lastTotal > 26 || lastCorrect < 0 || lastCorrect > lastTotal
+    ) {
+      throw new Error('INVALID_ALPHABET_CHALLENGE');
+    }
+
+    const fullChallenge = lastTotal === 26;
+    nextChallenge.attempts = (currentChallenge.attempts || 0) + 1;
+    nextChallenge.lastCorrect = lastCorrect;
+    nextChallenge.lastTotal = lastTotal;
+    nextChallenge.missedLetters = sanitizeLetters(missedLetters) || [];
+    nextChallenge.bestCorrect = fullChallenge
+      ? Math.max(currentChallenge.bestCorrect || 0, lastCorrect)
+      : currentChallenge.bestCorrect || 0;
+    nextChallenge.bestTotal = fullChallenge ? 26 : currentChallenge.bestTotal || 0;
+    nextChallenge.updatedAt = new Date();
+  }
+
+  return {
+    studiedLetters: ALPHABET_LETTERS.filter(letter =>
+      (current.studiedLetters || []).includes(letter) || studiedLetters.includes(letter)
+    ),
+    completedActivities: ASL_ACTIVITIES.filter(activity =>
+      (current.completedActivities || []).includes(activity) || completedActivities.includes(activity)
+    ),
+    challenge: nextChallenge,
+    updatedAt: new Date()
+  };
+};
 
 export const getRank = (xp) => {
   if (xp <= 500) return 'Philologist Apprentice';
@@ -34,7 +160,7 @@ export const isLevelUnlocked = async (user, lesson) => {
     academy: lesson.academy,
     level: lesson.level - 1
   });
-  if (!prereqLesson) return true;
+  if (!prereqLesson) return lesson.academy !== 'SIGN_LANGUAGE';
 
   const account = await Account.findById(user._id || user);
   if (!account || !account.completedLessons) return false;
@@ -108,6 +234,14 @@ router.get('/lessons', protect, async (req, res) => {
 
     // Enrich with user's unlock state and progress
     const user = await Account.findById(req.user._id).lean();
+    const aslXpByLesson = academy === 'SIGN_LANGUAGE'
+      ? await XpGrantLedger.find({ userId: req.user._id, status: 'COMMITTED' }).lean()
+      : [];
+    const xpMap = new Map(aslXpByLesson.map(grant => [
+      grant.lessonId.toString(),
+      (aslXpByLesson.filter(item => item.lessonId.toString() === grant.lessonId.toString())
+        .reduce((sum, item) => sum + item.amount, 0))
+    ]));
     const completedMap = new Map();
     (user?.completedLessons || []).forEach(cl => {
       completedMap.set(cl.lessonId.toString(), cl);
@@ -138,8 +272,19 @@ router.get('/lessons', protect, async (req, res) => {
           bestScore: progress.bestScore || progress.score,
           attemptsCount: progress.attemptsCount || 1,
           completedAt: progress.completedAt,
-          isPassed: !!isPassed
-        } : null
+          isPassed: !!isPassed,
+          xpEarned: xpMap.get(lessonIdStr) || 0
+        } : academy === 'SIGN_LANGUAGE' ? {
+          completedStages: getCompletedStages(user, lessonIdStr),
+          xpEarned: 0,
+          isPassed: false
+        } : null,
+        ...(academy === 'SIGN_LANGUAGE' ? {
+          completedStages: getCompletedStages(user, lessonIdStr),
+          ...(lesson.stableKey === 'asl_level_01'
+            ? { alphabetProgress: getAslAlphabetProgress(user, lessonIdStr) }
+            : {})
+        } : {})
       };
     });
 
@@ -168,7 +313,150 @@ router.get('/lesson/:lessonId', protect, async (req, res) => {
       return res.status(403).json({ message: `Level ${lesson.level} is locked. Complete Level ${lesson.level - 1} first.` });
     }
 
+    if (lesson.academy === 'SIGN_LANGUAGE') {
+      const account = await Account.findById(req.user._id).lean();
+      return res.json({
+        ...lesson.toObject(),
+        completedStages: getCompletedStages(account, lesson._id),
+        ...(lesson.stableKey === 'asl_level_01'
+          ? { alphabetProgress: getAslAlphabetProgress(account, lesson._id) }
+          : {})
+      });
+    }
+
     res.json(lesson);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.post('/lesson/:lessonId/stage-complete', protect, async (req, res) => {
+  const { lessonId } = req.params;
+  const { stage } = req.body;
+
+  if (!mongoose.Types.ObjectId.isValid(lessonId)) {
+    return res.status(400).json({ message: 'Invalid lesson ID' });
+  }
+  if (!ASL_STAGES.includes(stage)) {
+    return res.status(400).json({ message: 'Invalid learning stage' });
+  }
+
+  try {
+    const lesson = await Lesson.findById(lessonId);
+    if (!lesson) return res.status(404).json({ message: 'Lesson not found' });
+    if (lesson.academy !== 'SIGN_LANGUAGE') {
+      return res.status(400).json({ message: 'Stage tracking is only enabled for the ASL Academy' });
+    }
+
+    const unlocked = await isLevelUnlocked(req.user, lesson);
+    if (!unlocked) {
+      return res.status(403).json({ message: `Level ${lesson.level} is locked.` });
+    }
+
+    const account = await Account.findById(req.user._id);
+    if (!account) return res.status(404).json({ message: 'User not found' });
+
+    let progress = account.lessonStageProgress.find(
+      item => item.lessonId.toString() === lessonId
+    );
+    const completedStages = progress?.completedStages || [];
+
+    if (!canCompleteAslStage(completedStages, stage)) {
+      return res.status(409).json({ message: 'Complete the previous stage before continuing.' });
+    }
+
+    if (!completedStages.includes(stage)) {
+      if (!progress) {
+        account.lessonStageProgress.push({ lessonId, completedStages: [stage] });
+        progress = account.lessonStageProgress[account.lessonStageProgress.length - 1];
+      } else {
+        progress.completedStages.push(stage);
+      }
+      await account.save();
+    }
+
+    res.json({ completedStages: progress.completedStages });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+const loadAlphabetLesson = async (req, res, lessonId) => {
+  if (!mongoose.Types.ObjectId.isValid(lessonId)) {
+    res.status(400).json({ message: 'Invalid lesson ID' });
+    return null;
+  }
+  const lesson = await Lesson.findById(lessonId);
+  if (!lesson) {
+    res.status(404).json({ message: 'Lesson not found' });
+    return null;
+  }
+  if (lesson.academy !== 'SIGN_LANGUAGE' || lesson.stableKey !== 'asl_level_01') {
+    res.status(400).json({ message: 'Alphabet classroom tracking is only available for ASL Level 1' });
+    return null;
+  }
+  if (!(await isLevelUnlocked(req.user, lesson))) {
+    res.status(403).json({ message: 'This alphabet classroom is locked.' });
+    return null;
+  }
+  return lesson;
+};
+
+// @desc    Get ASL alphabet classroom progress for the authenticated learner
+// @route   GET /api/learning/lesson/:lessonId/alphabet-progress
+// @access  Private
+router.get('/lesson/:lessonId/alphabet-progress', protect, async (req, res) => {
+  try {
+    const lesson = await loadAlphabetLesson(req, res, req.params.lessonId);
+    if (!lesson) return;
+    const account = await Account.findById(req.user._id).lean();
+    res.json(getAslAlphabetProgress(account, lesson._id));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// @desc    Persist practice-only ASL alphabet progress (no XP or assessment effect)
+// @route   PUT /api/learning/lesson/:lessonId/alphabet-progress
+// @access  Private
+router.put('/lesson/:lessonId/alphabet-progress', protect, async (req, res) => {
+  try {
+    const lesson = await loadAlphabetLesson(req, res, req.params.lessonId);
+    if (!lesson) return;
+
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const patch = {};
+    ['studiedLetters', 'completedActivities', 'challenge'].forEach(key => {
+      if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = body[key];
+    });
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ message: 'No alphabet progress fields provided' });
+    }
+
+    const account = await Account.findById(req.user._id);
+    if (!account) return res.status(404).json({ message: 'User not found' });
+
+    let normalized;
+    try {
+      normalized = mergeAslAlphabetProgress(getAslAlphabetProgress(account, lesson._id), patch);
+    } catch (error) {
+      return res.status(400).json({ message: `Invalid alphabet progress: ${error.message}` });
+    }
+
+    let progress = account.aslAlphabetProgress.find(
+      item => item.lessonId.toString() === lesson._id.toString()
+    );
+    if (!progress) {
+      account.aslAlphabetProgress.push({ lessonId: lesson._id, ...normalized });
+    } else {
+      progress.studiedLetters = normalized.studiedLetters;
+      progress.completedActivities = normalized.completedActivities;
+      progress.challenge = normalized.challenge;
+      progress.updatedAt = new Date();
+    }
+    await account.save();
+
+    res.json(getAslAlphabetProgress(account, lesson._id));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -191,6 +479,12 @@ router.get('/quiz/:lessonId', protect, async (req, res) => {
     const unlocked = await isLevelUnlocked(req.user, lesson);
     if (!unlocked) {
       return res.status(403).json({ message: `Assessment for Level ${lesson.level} is locked. Complete Level ${lesson.level - 1} first.` });
+    }
+    if (lesson.academy === 'SIGN_LANGUAGE') {
+      const account = await Account.findById(req.user._id).lean();
+      if (!areAllAslStagesComplete(account, lessonId)) {
+        return res.status(403).json({ message: 'Complete all learning stages before opening the final assessment.' });
+      }
     }
 
     const quiz = await Quiz.findOne({ lessonId });
@@ -372,6 +666,12 @@ router.post(['/assessment/submit', '/quiz/:lessonId/submit'], protect, assessmen
     const unlocked = await isLevelUnlocked(req.user, lesson);
     if (!unlocked) {
       return res.status(403).json({ message: `Prerequisite Level ${lesson.level - 1} must be completed before taking this assessment.` });
+    }
+    if (lesson.academy === 'SIGN_LANGUAGE') {
+      const account = await Account.findById(req.user._id).lean();
+      if (!areAllAslStagesComplete(account, lessonId)) {
+        return res.status(403).json({ message: 'Complete all learning stages before taking the final assessment.' });
+      }
     }
 
     // 2. Prepare submitted answers
