@@ -17,16 +17,17 @@ export async function parseIntent(transcript) {
 
     if (!res.ok) {
       console.error('Intent parse API error:', res.status);
-      return { action: 'UNKNOWN', password: null };
+      return { action: 'UNKNOWN', password: null, message: null };
     }
 
     const data = await res.json();
     return {
       action: data.action || 'UNKNOWN',
       password: data.password || null,
+      message: data.message || null,
     };
   } catch (err) {
     console.error('Intent parse failed:', err);
-    return { action: 'UNKNOWN', password: null };
+    return { action: 'UNKNOWN', password: null, message: null };
   }
 }
