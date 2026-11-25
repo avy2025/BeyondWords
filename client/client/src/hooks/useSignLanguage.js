@@ -3,6 +3,10 @@ import { useEffect, useRef, useState } from 'react';
 const WS_URL =
   import.meta.env.VITE_SIGN_LANGUAGE_WS_URL || 'ws://127.0.0.1:8765';
 
+const RECONNECT_DELAY_MS = 2000;
+const MAX_RECONNECT_DELAY_MS = 30000;
+const SIGN_SERVER_ERROR = `Sign WS error — is python sign_ws_server.py running at ${WS_URL}?`;
+
 /**
  * Local: sends video frames to Python sign_ws_server, broadcasts label via Socket.IO.
  * Remote: listens for sign_gesture_update for this tile's peerId.
@@ -36,83 +40,120 @@ export function useSignLanguage(
     }
 
     let ws;
-    try {
-      ws = new WebSocket(WS_URL);
-    } catch {
-      setSignOverlay('Sign server unavailable');
-      return;
-    }
-    wsRef.current = ws;
+    let reconnectTimer = null;
+    let reconnectDelay = RECONNECT_DELAY_MS;
+    let disposed = false;
 
-    ws.onopen = () => {
-      intervalRef.current = window.setInterval(() => {
-        const video = videoRef?.current;
-        if (!video || video.readyState < 2) return;
-        const w = Math.min(video.videoWidth || 0, 640);
-        const h = Math.min(video.videoHeight || 0, 480);
-        if (!w || !h) return;
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-        ctx.drawImage(video, 0, 0, w, h);
-        const data = canvas.toDataURL('image/jpeg', 0.55).split(',')[1];
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'frame', data }));
-        }
-      }, 220);
-    };
-
-    ws.onmessage = (ev) => {
-      let payload;
-      try {
-        payload = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      const label = payload.label || '';
-      const confidence = typeof payload.confidence === 'number' ? payload.confidence : 0;
-      const sentence = payload.sentence || '';
-
-      const line = label ? `${label} · ${Math.round(confidence)}%` : '';
-      setSignOverlay(line);
-      setSignSentence(sentence);
-
-      const smooth = label;
-      if (!smooth || !socket.current) return;
-      const now = Date.now();
-      const last = lastEmitRef.current;
-      if ((smooth !== last.label || now - last.t > 450) && socket.current) {
-        lastEmitRef.current = { label: smooth, t: now };
-        socket.current.emit('send-sign-gesture', {
-          roomId,
-          peerId,
-          userName: userName || 'Guest',
-          label: smooth,
-          confidence,
-          sentence, // Broadcast the sentence too
-        });
-      }
-    };
-
-    ws.onerror = () => {
-      setSignOverlay((prev) => prev || 'Sign WS error — is python sign_ws_server.py running?');
-    };
-
-    ws.onclose = () => {};
-
-    return () => {
+    const clearFrameInterval = () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      setSignOverlay('Sign WS disconnected — retrying…');
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
+        connect();
+      }, reconnectDelay);
+    };
+
+    const connect = () => {
+      if (disposed) return;
+
       try {
-        ws.close();
+        ws = new WebSocket(WS_URL);
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectDelay = RECONNECT_DELAY_MS;
+        setSignOverlay('');
+        clearFrameInterval();
+
+        intervalRef.current = window.setInterval(() => {
+          const video = videoRef?.current;
+          if (!video || video.readyState < 2) return;
+          const w = Math.min(video.videoWidth || 0, 640);
+          const h = Math.min(video.videoHeight || 0, 480);
+          if (!w || !h) return;
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+          ctx.drawImage(video, 0, 0, w, h);
+          const data = canvas.toDataURL('image/jpeg', 0.55).split(',')[1];
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'frame', data }));
+          }
+        }, 220);
+      };
+
+      ws.onmessage = (ev) => {
+        let payload;
+        try {
+          payload = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        const label = payload.label || '';
+        const confidence = typeof payload.confidence === 'number' ? payload.confidence : 0;
+        const sentence = payload.sentence || '';
+
+        const line = label ? `${label} · ${Math.round(confidence)}%` : '';
+        setSignOverlay(line);
+        setSignSentence(sentence);
+
+        const smooth = label;
+        if (!smooth || !socket.current) return;
+        const now = Date.now();
+        const last = lastEmitRef.current;
+        if ((smooth !== last.label || now - last.t > 450) && socket.current) {
+          lastEmitRef.current = { label: smooth, t: now };
+          socket.current.emit('send-sign-gesture', {
+            roomId,
+            peerId,
+            userName: userName || 'Guest',
+            label: smooth,
+            confidence,
+            sentence, // Broadcast the sentence too
+          });
+        }
+      };
+
+      ws.onerror = () => {
+        setSignOverlay((prev) => prev || SIGN_SERVER_ERROR);
+      };
+
+      ws.onclose = () => {
+        if (wsRef.current === ws) wsRef.current = null;
+        clearFrameInterval();
+        scheduleReconnect();
+      };
+    };
+
+    connect();
+
+    return () => {
+      disposed = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      clearFrameInterval();
+      try {
+        ws?.close();
       } catch {
         /* ignore */
       }
-      wsRef.current = null;
+      if (wsRef.current === ws) wsRef.current = null;
       setSignOverlay('');
       setSignSentence('');
     };

@@ -14,13 +14,11 @@ import { ProfilePage } from "@/pages/ProfilePage";
 import { EditProfilePage } from "@/pages/EditProfilePage";
 import { SchedulePage } from "@/pages/SchedulePage";
 import { LearningHubPage } from "@/pages/LearningHubPage";
+import { AslAcademyPage } from "@/pages/AslAcademyPage";
 import { FeatureDetailPage } from "@/pages/FeatureDetailPage";
 import { InfoPage } from "@/pages/InfoPage";
 import { LobbyPage } from "@/pages/LobbyPage";
 import RoomPage from "@/pages/RoomPage";
-// @ts-ignore
-import VoiceAgent from "@/components/VoiceAgent";
-
 
 import { useAuth } from "@/hooks/use-auth";
 import { Redirect } from "wouter";
@@ -68,6 +66,9 @@ function Router() {
       <Route path="/learning">
         {(params) => <ProtectedRoute component={LearningHubPage} params={params} />}
       </Route>
+      <Route path="/asl-academy">
+        {(params) => <ProtectedRoute component={AslAcademyPage} params={params} />}
+      </Route>
       
       {/* Public Routes */}
       <Route path="/about" component={AboutPage} />
@@ -80,15 +81,11 @@ function Router() {
 
 
 function App() {
-  const { user, isLoading } = useAuth();
-
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
         <Router />
-        {/* Only render VoiceAgent if user is authenticated */}
-        {!isLoading && user && <VoiceAgent />}
       </TooltipProvider>
     </QueryClientProvider>
   );

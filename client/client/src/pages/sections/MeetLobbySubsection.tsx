@@ -4,11 +4,7 @@ import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { staggerContainer, fadeUp, scaleIn } from "@/lib/animations";
-
-function generateRoomId() {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  return Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-}
+import { joinRoom, startMeeting } from "@/lib/meetingFlow";
 
 export const MeetLobbySubsection = (): JSX.Element => {
   const [, navigate] = useLocation();
@@ -36,9 +32,13 @@ export const MeetLobbySubsection = (): JSX.Element => {
       setError("Please enter a Room ID to join.");
       return;
     }
-    const finalRoomId = mode === "create" ? generateRoomId() : roomId.trim();
-    // Navigate to the real meeting room with params in the URL
-    navigate(`/room/${finalRoomId}?name=${encodeURIComponent(userName.trim())}`);
+    if (mode === "create") {
+      // Same meeting-start action used by Mr. Pineapple's voice command.
+      startMeeting(navigate, userName.trim());
+    } else {
+      // Same navigation as Mr. Pineapple's guided spoken join flow.
+      joinRoom(navigate, roomId.trim(), userName.trim());
+    }
   };
 
   return (

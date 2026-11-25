@@ -11,8 +11,28 @@ import { useSocket } from "@/hooks/useSocket";
 import { useTranslation } from "@/hooks/useTranslation";
 // @ts-ignore
 import { useSignLanguage } from "@/hooks/useSignLanguage";
+// @ts-ignore
+import { useAzureLiveSubtitles } from "@/hooks/useAzureLiveSubtitles";
+// @ts-ignore
+import LiveSubtitlesPanel from "@/components/LiveSubtitlesPanel";
+// @ts-ignore
+import { useCaptionHost } from "@/hooks/useCaptionHost";
+// @ts-ignore
+import CaptionHostControl from "@/components/CaptionHostControl";
+// @ts-ignore
+import { useCaptionTranscription } from "@/hooks/useCaptionTranscription";
+// @ts-ignore
+import CaptionTranscriptionControl from "@/components/CaptionTranscriptionControl";
+// @ts-ignore
+import { useParticipantSubtitles } from "@/hooks/useParticipantSubtitles";
+// @ts-ignore
+import ParticipantSubtitlesPanel from "@/components/ParticipantSubtitlesPanel";
 
 import { useAuth } from "@/hooks/use-auth";
+
+const subtitleDebug = (event: string, details: Record<string, unknown> = {}) => {
+  if (import.meta.env?.DEV) console.debug(`[live-subtitles] ${event}`, details);
+};
 
 // ─── Video Tile ────────────────────────────────────────────────────────────
 type TranslationMode = 'hi-en' | 'de-en';
@@ -209,7 +229,7 @@ export default function RoomPage() {
   const [, navigate] = useLocation();
   const params = useParams<{ roomId: string }>();
   const roomId = params.roomId;
-  const { user, isLoading: authLoading } = useAuth();
+  const { user, token: authToken, isLoading: authLoading } = useAuth();
 
   const userName = user?.userName || "Guest";
 
@@ -228,7 +248,7 @@ export default function RoomPage() {
     onChatMessage, sendChatMessage,
     onReaction, sendReaction,
     onMeetingEnded, onUserRemoved, onYouWereRemoved,
-    sendRemoveParticipant, sendEndMeeting
+    sendRemoveParticipant, sendEndMeeting, authorizeLiveSubtitles
   } = useSocket();
 
   const [chatMessages, setChatMessages] = useState<{ userName: string; message: string; time: string }[]>([]);
@@ -241,11 +261,80 @@ export default function RoomPage() {
   const [translationMode, setTranslationMode] = useState<TranslationMode>('hi-en');
   const [reactions, setReactions] = useState<{ id: number; emoji: string; peerId: string }[]>([]);
   const [participants, setParticipants] = useState<{ peerId: string; userName: string }[]>([]);
+  // Set only when the existing join-room flow confirms server membership via room-users.
+  const [roomJoined, setRoomJoined] = useState(false);
   const [hostPeerId, setHostPeerId] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [liveSubtitlesEnabled, setLiveSubtitlesEnabled] = useState(false);
+  const [liveSubtitleAuthorization, setLiveSubtitleAuthorization] = useState<"authorizing" | "authorized" | "error">("authorizing");
+  const [liveSubtitleAuthorizationError, setLiveSubtitleAuthorizationError] = useState<string | null>(null);
+  const [liveAudioSourceId, setLiveAudioSourceId] = useState("local");
+  const [liveSourceLanguage, setLiveSourceLanguage] = useState("auto");
+  const [liveTargetLanguage, setLiveTargetLanguage] = useState("en");
+  const [liveDisplayMode, setLiveDisplayMode] = useState<"original" | "translation" | "both">("both");
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   const isHost = myPeerId === hostPeerId;
+
+  // Isolated Azure F0 subtitles reuse existing WebRTC/media tracks only.
+  const liveAudioSources = [
+    ...(localStream?.getAudioTracks().some((track: MediaStreamTrack) => track.readyState === "live")
+      ? [{ id: "local", label: "You (microphone)", stream: localStream, userName }]
+      : []),
+    ...Object.entries(peers as Record<string, { stream: MediaStream; userName: string }>)
+      .filter(([, peer]) => peer.stream?.getAudioTracks().some((track: MediaStreamTrack) => track.readyState === "live"))
+      .map(([peerId, peer]) => ({
+        id: peerId,
+        label: `${peer.userName || "Participant"}'s audio`,
+        stream: peer.stream,
+        userName: peer.userName || "Participant",
+      })),
+  ];
+  const selectedLiveAudio =
+    liveAudioSources.find((source) => source.id === liveAudioSourceId) || liveAudioSources[0] || null;
+  const selectedLiveSpeaker = selectedLiveAudio?.userName || "Speaker";
+
+  const liveSubtitles = useAzureLiveSubtitles({
+    enabled: liveSubtitlesEnabled,
+    authToken,
+    roomId,
+    peerId: myPeerId,
+    stream: selectedLiveAudio?.stream || null,
+    sourceLanguage: liveSourceLanguage,
+    targetLanguage: liveTargetLanguage,
+  });
+
+  // Explicit Caption Host lifecycle. Sarvam transcription reuses localStream only.
+  const captionHost = useCaptionHost({
+    socket,
+    roomId,
+    peerId: myPeerId,
+    authToken,
+    isConnected,
+    roomJoined,
+  });
+
+  const captionTranscription = useCaptionTranscription({
+    socket,
+    roomId,
+    peerId: myPeerId,
+    captionHost,
+    stream: localStream,
+    isConnected,
+  });
+
+  // Independent participant-level subtitles never claim the Caption Host lease
+  // and never depend on Azure subtitles. All worklet-based consumers share one
+  // microphone capture pipeline per MediaStream.
+  const participantSubtitles = useParticipantSubtitles({
+    socket,
+    roomId,
+    peerId: myPeerId,
+    authToken,
+    isConnected,
+    roomJoined,
+    stream: localStream,
+  });
 
   // Timer
   useEffect(() => {
@@ -269,11 +358,36 @@ export default function RoomPage() {
     joinRoom({ roomId, userName, peerId: myPeerId });
   }, [myPeerId, isConnected, roomId, userName, joinRoom, localStream]);
 
+  // A reconnect, room change, or peer change invalidates the previous membership confirmation.
+  useEffect(() => {
+    setRoomJoined(false);
+  }, [isConnected, roomId, myPeerId]);
+
+  // Bind the authenticated account to this meeting participant before token issuance.
+  // localStream is required here because the join-room effect above only joins
+  // once media is ready; authorizing earlier is rejected as "not in room".
+  useEffect(() => {
+    if (!socket?.current || !isConnected || !roomId || !myPeerId || !authToken || !localStream) return undefined;
+    let cancelled = false;
+    setLiveSubtitleAuthorization("authorizing");
+    setLiveSubtitleAuthorizationError(null);
+    subtitleDebug("authorization request", { hasRoomId: Boolean(roomId), hasPeerId: Boolean(myPeerId), hasToken: Boolean(authToken) });
+    authorizeLiveSubtitles({ roomId, peerId: myPeerId, token: authToken }, (result: { ok?: boolean; message?: string } | undefined) => {
+      if (cancelled) return;
+      subtitleDebug("authorization response", { ok: Boolean(result?.ok), message: result?.message });
+      setLiveSubtitleAuthorization(result?.ok ? "authorized" : "error");
+      setLiveSubtitleAuthorizationError(result?.ok ? null : (result?.message || "Subtitle authorization failed."));
+    });
+    return () => { cancelled = true; };
+  }, [socket, isConnected, roomId, myPeerId, authToken, localStream, authorizeLiveSubtitles]);
+
   // Handle existing users
   useEffect(() => {
     const cleanup = onRoomUsers((users: { peerId: string; userName: string }[], currentHostPeerId: string) => {
       setParticipants(users);
       setHostPeerId(currentHostPeerId);
+      // Existing join-room handler emits room-users only after addUserToInMemRoom.
+      setRoomJoined(true);
       callExistingUsers(users, userName);
     });
     return cleanup;
@@ -324,10 +438,12 @@ export default function RoomPage() {
   // Handle meeting ended by host
   useEffect(() => {
     const cleanupMeeting = onMeetingEnded(({ message }: { message: string }) => {
+      setLiveSubtitlesEnabled(false);
       alert(message);
       navigate("/dashboard");
     });
     const cleanupRemoved = onYouWereRemoved(() => {
+      setLiveSubtitlesEnabled(false);
       alert("You have been removed from the meeting by the host.");
       navigate("/dashboard");
     });
@@ -388,11 +504,13 @@ export default function RoomPage() {
   const endMeeting = () => {
     if (!isHost) return;
     if (confirm("Are you sure you want to end the meeting for everyone?")) {
+      setLiveSubtitlesEnabled(false);
       sendEndMeeting({ roomId });
     }
   };
 
   const handleLeave = useCallback(() => {
+    setLiveSubtitlesEnabled(false);
     leaveRoom({ roomId });
     navigate("/dashboard");
   }, [leaveRoom, roomId, navigate]);
@@ -499,6 +617,31 @@ export default function RoomPage() {
         </div>
       </motion.nav>
 
+      {/* ── Optional isolated Azure F0 live subtitles ─────── */}
+      <LiveSubtitlesPanel
+        enabled={liveSubtitlesEnabled}
+        onEnabledChange={setLiveSubtitlesEnabled}
+        authorizationState={liveSubtitleAuthorization}
+        authorizationError={liveSubtitleAuthorizationError}
+        sourceLanguage={liveSourceLanguage}
+        onSourceLanguageChange={setLiveSourceLanguage}
+        targetLanguage={liveTargetLanguage}
+        onTargetLanguageChange={setLiveTargetLanguage}
+        displayMode={liveDisplayMode}
+        onDisplayModeChange={setLiveDisplayMode}
+        audioSources={liveAudioSources}
+        audioSourceId={selectedLiveAudio?.id || ""}
+        onAudioSourceChange={setLiveAudioSourceId}
+        subtitles={liveSubtitles}
+        speakerLabel={selectedLiveSpeaker}
+      />
+
+      {/* ── Independent participant-level translated subtitles ─ */}
+      <ParticipantSubtitlesPanel
+        translation={participantSubtitles}
+        roomJoined={roomJoined}
+      />
+
       {/* ── Main area ──────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden relative">
         {/* Video Grid */}
@@ -604,6 +747,21 @@ export default function RoomPage() {
               >
                 <span className="font-bold text-sm">CC</span>
               </motion.button>
+
+              {/* Explicit Caption Host selection (lifecycle only) */}
+              <CaptionHostControl
+                captionHost={captionHost}
+                peerId={myPeerId}
+                participants={participants}
+                isConnected={isConnected}
+                roomJoined={roomJoined}
+              />
+
+              {/* Isolated Sarvam-only original transcription (no translation) */}
+              <CaptionTranscriptionControl
+                transcription={captionTranscription}
+                isCaptionHost={captionHost.isCaptionHost}
+              />
 
               {/* Language toggle — only visible when CC is active */}
               {showSubtitles && (

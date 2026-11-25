@@ -75,6 +75,24 @@ export function useSocket() {
     socketRef.current?.emit('send-subtitle', { roomId, peerId, translated, type })
   }, [])
 
+  // Separate authenticated event for the isolated Azure F0 subtitle feature.
+  const authorizeLiveSubtitles = useCallback(({ roomId, peerId, token }, ack) => {
+    socketRef.current?.emit('live-subtitles:authorize', { roomId, peerId, token }, ack)
+  }, [])
+
+  // Explicit Caption Host lifecycle events (isolated from subtitles).
+  const claimCaptionHost = useCallback((request, ack) => {
+    socketRef.current?.emit('caption-host:claim', request, ack)
+  }, [])
+
+  const heartbeatCaptionHost = useCallback((request, ack) => {
+    socketRef.current?.emit('caption-host:heartbeat', request, ack)
+  }, [])
+
+  const releaseCaptionHost = useCallback((request, ack) => {
+    socketRef.current?.emit('caption-host:release', request, ack)
+  }, [])
+
   // Event registration helpers (Stable)
   const onSubtitleUpdate = useCallback((cb) => {
     socketRef.current?.on('subtitle_update', cb)
@@ -126,6 +144,11 @@ export function useSocket() {
     return () => socketRef.current?.off('room-full', cb)
   }, [])
 
+  const onCaptionHostStatus = useCallback((cb) => {
+    socketRef.current?.on('caption-host:status', cb)
+    return () => socketRef.current?.off('caption-host:status', cb)
+  }, [])
+
   return {
     socket: socketRef,
     isConnected,
@@ -136,6 +159,10 @@ export function useSocket() {
     sendRemoveParticipant,
     sendEndMeeting,
     sendSubtitle,
+    authorizeLiveSubtitles,
+    claimCaptionHost,
+    heartbeatCaptionHost,
+    releaseCaptionHost,
     onRoomUsers,
     onUserJoined,
     onUserLeft,
@@ -145,6 +172,7 @@ export function useSocket() {
     onUserRemoved,
     onYouWereRemoved,
     onRoomFull,
+    onCaptionHostStatus,
     onSubtitleUpdate,
   }
 }
