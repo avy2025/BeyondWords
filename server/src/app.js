@@ -5,6 +5,7 @@ import roomRoutes from './routes/roomRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import learningRoutes from './routes/learningRoutes.js';
 import voiceRoutes from './routes/voiceRoutes.js';
+import liveSubtitleRoutes from './routes/liveSubtitleRoutes.js';
 import errorMiddleware from './middleware/errorMiddleware.js';
 
 const initApp = (httpServer) => {
@@ -15,6 +16,8 @@ const initApp = (httpServer) => {
     origin: [
       'http://localhost:5173',
       'http://127.0.0.1:5173',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
       'http://localhost:5000',
       'http://127.0.0.1:5000',
       'https://beyond-words-app.vercel.app',
@@ -51,6 +54,7 @@ const initApp = (httpServer) => {
   app.use('/api/rooms', roomRoutes);
   app.use('/api/learning', learningRoutes);
   app.use('/api/voice', voiceRoutes);
+  app.use('/api/live-subtitles', liveSubtitleRoutes);
 
   // ── Error Handling ────────────
   app.use(errorMiddleware);

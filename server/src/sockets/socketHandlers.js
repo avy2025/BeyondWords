@@ -1,3 +1,4 @@
+import jwt from 'jsonwebtoken';
 import {
   addUserToInMemRoom,
   removeUserFromInMemRoom,
@@ -6,9 +7,13 @@ import {
   clearInMemRoom,
   getUsersInInMemRoom,
 } from '../services/roomService.js';
+import { isSafeRoomIdentifier } from '../../../client/shared/liveSubtitles.js';
+import { authorizeLiveSubtitleMember, removeLiveSubtitleMemberBySocket } from '../services/liveSubtitleMembershipService.js';
+import { releaseLiveSubtitleSessionsForAccount } from '../services/liveSubtitleQuotaService.js';
 import Message from '../models/Message.js';
 import Room from '../models/Room.js';
 import User from '../models/User.js';
+import Account from '../models/Account.js';
 import { sanitizeUserName, sanitizeText, sanitizeEmoji, sanitizeGestureLabel } from '../utils/sanitize.js';
 import SignGesture from '../models/SignGesture.js';
 
@@ -184,8 +189,54 @@ export const registerSocketHandlers = (socket, io) => {
     }
   );
 
+  // ── Live subtitles membership (separate, authenticated event) ──
+  // This does not alter join-room or any existing Socket.IO payload contract.
+  socket.on('live-subtitles:authorize', async ({ roomId: rawRoomId, peerId: rawPeerId, token } = {}, ack = () => {}) => {
+    const respond = typeof ack === 'function' ? ack : () => {};
+    try {
+      const roomId = sanitizeText(rawRoomId);
+      const peerId = sanitizeText(rawPeerId);
+
+      if (!token || !isSafeRoomIdentifier(roomId) || !isSafeRoomIdentifier(peerId)) {
+        return respond({ ok: false, message: 'Invalid subtitle authorization request.' });
+      }
+
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const account = await Account.findById(decoded.id).select('_id');
+      if (!account) {
+        return respond({ ok: false, message: 'Account not found.' });
+      }
+
+      const inRoom = getUsersInInMemRoom(roomId).some(
+        (user) => user.peerId === peerId && user.socketId === socket.id
+      );
+      if (!inRoom) {
+        return respond({ ok: false, message: 'Join the meeting before enabling live subtitles.' });
+      }
+
+      authorizeLiveSubtitleMember({
+        roomId,
+        peerId,
+        accountId: account._id,
+        socketId: socket.id,
+      });
+      return respond({ ok: true });
+    } catch (error) {
+      console.error('❌ Live subtitle authorization failed:', error.message);
+      return respond({ ok: false, message: 'Subtitle authorization failed.' });
+    }
+  });
+
   // ── Leave / Disconnect ────────
+  const releaseLiveSubtitleResources = () => {
+    const removed = removeLiveSubtitleMemberBySocket(socket.id);
+    removed.forEach((membership) => {
+      releaseLiveSubtitleSessionsForAccount(membership.accountId);
+    });
+  };
+
   const handleLeaveAction = () => {
+    releaseLiveSubtitleResources();
     const { roomId, removedUser, newHost } = removeUserFromInMemRoom(socket.id);
 
     if (removedUser && roomId) {
