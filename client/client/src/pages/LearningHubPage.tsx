@@ -14,6 +14,7 @@ import {
 import { NuanceGame } from "@/components/NuanceGame";
 import { SignLanguageLearning } from "@/components/SignLanguageLearning";
 import { GermanLearning } from "@/components/GermanLearning";
+import { AslLearning } from "@/components/AslLearning";
 import { useState, useEffect, useMemo } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import { AchievementsDialog } from "@/components/AchievementsDialog";
@@ -49,12 +50,14 @@ export const LearningHubPage = () => {
   const [selectedLessonId, setSelectedLessonId] = useState<string | null>(null);
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'ALL' | 'PROGRESS' | 'CHALLENGES' | 'SIGN_LANGUAGE' | 'GERMAN'>('ALL');
+  const [activeTab, setActiveTab] = useState<'ALL' | 'PROGRESS' | 'CHALLENGES' | 'SIGN_LANGUAGE' | 'GERMAN' | 'ASL_ACADEMY'>('ALL');
   const [showAchievements, setShowAchievements] = useState(false);
   const [signLanguageLanguage, setSignLanguageLanguage] = useState<'en' | 'de'>('en');
   const [completedSignLanguageLessons, setCompletedSignLanguageLessons] = useState<string[]>([]);
   const [germanCompletedCount, setGermanCompletedCount] = useState<number>(0);
   const [germanEarnedXp, setGermanEarnedXp] = useState<number>(0);
+  const [aslCompletedCount, setAslCompletedCount] = useState<number>(0);
+  const [aslEarnedXp, setAslEarnedXp] = useState<number>(0);
 
   useEffect(() => {
     const fetchLessons = async () => {
@@ -94,16 +97,35 @@ export const LearningHubPage = () => {
       }
     };
 
+    const fetchAslStats = async () => {
+      try {
+        const res = await fetch('http://localhost:5000/api/learning/lessons?academy=SIGN_LANGUAGE', {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        if (res.ok) {
+          const aslLevels = await res.json();
+          const passed = aslLevels.filter((lvl: any) => lvl.userProgress?.isPassed);
+          setAslCompletedCount(passed.length);
+          setAslEarnedXp(aslLevels.reduce((sum: number, lvl: any) => sum + (lvl.userProgress?.xpEarned || 0), 0));
+        }
+      } catch (err) {
+        console.error('Failed to fetch ASL progress:', err);
+      }
+    };
+
     if (token) {
       fetchLessons();
       fetchGermanStats();
+      fetchAslStats();
     } else {
       setIsLoading(false);
     }
   }, [token]);
 
   const filteredLessons = useMemo(() => {
-    if (activeTab === 'SIGN_LANGUAGE' || activeTab === 'GERMAN') return []; // These have their own components
+    if (activeTab === 'SIGN_LANGUAGE' || activeTab === 'GERMAN' || activeTab === 'ASL_ACADEMY') return []; // These have their own components
     if (activeTab === 'ALL') return lessons;
     if (activeTab === 'PROGRESS') {
       return lessons.filter(l => user?.completedLessons?.some(cl => cl.lessonId === l._id));
@@ -138,10 +160,36 @@ export const LearningHubPage = () => {
   };
 
   const handleGermanLessonComplete = (lesson: any, xp: number) => {
-    // Update user's XP and track completion
+    // Refresh German stats after a level is passed
     console.log(`Completed German lesson: ${lesson.title}, Earned: ${xp} XP`);
-    setCompletedGermanLessons([...completedGermanLessons, lesson.id]);
-    // You can dispatch an action here or make API call to update user progress
+    // Re-fetch German stats so the overview card stays up to date
+    if (token) {
+      fetch('http://localhost:5000/api/learning/lessons?academy=GERMAN', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+        .then(r => r.ok ? r.json() : [])
+        .then((germanLevels: any[]) => {
+          const passed = germanLevels.filter((lvl: any) => lvl.userProgress?.isPassed);
+          setGermanCompletedCount(passed.length);
+          const earnedXp = passed.reduce((sum: number, lvl: any) => sum + (lvl.xpReward || 100), 0);
+          setGermanEarnedXp(earnedXp);
+        })
+        .catch(() => {});
+    }
+  };
+
+  const handleAslLessonComplete = (_lesson: any, _xp: number) => {
+    if (!token) return;
+    fetch('http://localhost:5000/api/learning/lessons?academy=SIGN_LANGUAGE', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+      .then(r => r.ok ? r.json() : [])
+      .then((aslLevels: any[]) => {
+        const passed = aslLevels.filter((lvl: any) => lvl.userProgress?.isPassed);
+        setAslCompletedCount(passed.length);
+        setAslEarnedXp(aslLevels.reduce((sum: number, lvl: any) => sum + (lvl.userProgress?.xpEarned || 0), 0));
+      })
+      .catch(() => {});
   };
 
   if (showGame && selectedLessonId) {
@@ -270,6 +318,14 @@ export const LearningHubPage = () => {
                   <Hand className="w-4 h-4" />
                   SIGN LANGUAGE
                 </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => setActiveTab('ASL_ACADEMY')}
+                  className={`font-bold transition-all rounded-none px-0 h-auto pb-4 flex items-center gap-2 ${activeTab === 'ASL_ACADEMY' ? 'text-[#102c26] border-b-2 border-[#102c26]' : 'text-[#414846] opacity-60'}`}
+                >
+                  <Hand className="w-4 h-4" />
+                  ASL ACADEMY
+                </Button>
                 <Button 
                   variant="ghost" 
                   onClick={() => setActiveTab('GERMAN')}
@@ -307,18 +363,26 @@ export const LearningHubPage = () => {
               <section className="pb-32">
                 <div className="mb-6 p-4 bg-purple-50 border border-purple-200 rounded-2xl flex items-center justify-between">
                   <div>
-                    <span className="text-xs uppercase font-bold text-purple-700 tracking-wider">PHASE 4 PREVIEW</span>
-                    <h3 className="font-bold text-purple-950 text-base">Sign Language Academy</h3>
-                    <p className="text-xs text-purple-800">Camera-based inference and gesture tracking will be fully unlocked in Phase 4.</p>
+                    <span className="text-xs uppercase font-bold text-purple-700 tracking-wider">GESTURE LAB</span>
+                    <h3 className="font-bold text-purple-950 text-base">Camera gesture preview</h3>
+                    <p className="text-xs text-purple-800">The supported gesture demo remains here. The structured ASL Academy is a separate tab and does not require a camera.</p>
                   </div>
-                  <Badge variant="outline" className="bg-white border-purple-300 text-purple-700 font-bold">
-                    Coming in Phase 4
-                  </Badge>
+                  <Button
+                    variant="outline"
+                    onClick={() => setActiveTab('ASL_ACADEMY')}
+                    className="border-purple-300 text-purple-700 font-bold whitespace-nowrap"
+                  >
+                    Open ASL Academy
+                  </Button>
                 </div>
                 <SignLanguageLearning 
                   language={signLanguageLanguage} 
                   onLessonComplete={handleSignLanguageLessonComplete}
                 />
+              </section>
+            ) : activeTab === 'ASL_ACADEMY' ? (
+              <section className="pb-32">
+                <AslLearning onLessonComplete={handleAslLessonComplete} />
               </section>
             ) : activeTab === 'GERMAN' ? (
               <section className="pb-32">
@@ -391,30 +455,31 @@ export const LearningHubPage = () => {
                       </div>
                     </Card>
 
-                    {/* Sign Language Academy Card */}
+                    {/* ASL Academy Card */}
                     <Card className="bg-gradient-to-br from-purple-900 to-indigo-950 text-white border-none shadow-md rounded-2xl p-6 flex flex-col justify-between">
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <span className="text-3xl">🖐️</span>
                           <Badge className="bg-purple-200 text-purple-950 text-[10px] font-bold">
-                            PHASE 4 PREVIEW
+                            ASL • 10 LEVELS
                           </Badge>
                         </div>
-                        <h3 className="font-bold text-xl text-white">Sign Language</h3>
+                        <h3 className="font-bold text-xl text-white">ASL Academy</h3>
                         <p className="text-xs text-purple-200/80 leading-relaxed">
-                          Interactive hand gesture recognition and multimodal practice. Full service integration in Phase 4.
+                          A connected alphabet-to-conversation path with five learning stages and server-graded assessments.
+                          No camera required.
                         </p>
                       </div>
                       <div className="pt-6 mt-auto space-y-3">
                         <div className="flex justify-between items-center text-xs text-purple-200 font-bold">
-                          <span>Interactive Preview</span>
-                          <span>Webcam Ready</span>
+                          <span>{aslCompletedCount} / 10 Levels Completed</span>
+                          <span>+{aslEarnedXp} XP</span>
                         </div>
                         <Button
-                          onClick={() => setActiveTab('SIGN_LANGUAGE')}
+                          onClick={() => navigate('/asl-academy')}
                           className="w-full bg-purple-200 hover:bg-white text-purple-950 font-bold text-xs rounded-xl h-10 flex items-center justify-center gap-1.5"
                         >
-                          <span>Preview Academy</span>
+                          <span>Open ASL Academy</span>
                           <ArrowRight className="w-3.5 h-3.5" />
                         </Button>
                       </div>
@@ -424,7 +489,7 @@ export const LearningHubPage = () => {
 
                 {/* Progress Summary from All Modules */}
                 {(activeTab === 'PROGRESS' || activeTab === 'CHALLENGES') && (
-                  <section className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                  <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
                     <Card className="bg-gradient-to-br from-blue-50 to-blue-100 border-blue-200">
                       <CardContent className="p-6">
                         <div className="text-3xl mb-2">📚</div>
@@ -443,13 +508,21 @@ export const LearningHubPage = () => {
                         </span>
                       </CardContent>
                     </Card>
+                    <Card className="bg-gradient-to-br from-purple-50 to-purple-100 border-purple-200">
+                      <CardContent className="p-6">
+                        <div className="text-3xl mb-2">🖐️</div>
+                        <h3 className="font-bold text-[#102c26] mb-1">ASL Academy</h3>
+                        <p className="text-sm text-slate-600 mb-3">Alphabet to conversation</p>
+                        <span className="font-bold text-purple-700">{aslCompletedCount} / 10 Completed</span>
+                      </CardContent>
+                    </Card>
                     <Card className="bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-200">
                       <CardContent className="p-6">
                         <div className="text-3xl mb-2">🌍</div>
                         <h3 className="font-bold text-[#102c26] mb-1">Overall Progress</h3>
                         <p className="text-sm text-slate-600 mb-3">All modules combined</p>
                         <span className="font-bold text-emerald-600">
-                          {germanCompletedCount + lessons.filter(l => user?.completedLessons?.some(cl => cl.lessonId === l._id)).length} / {10 + lessons.length} Completed
+                          {germanCompletedCount + aslCompletedCount + lessons.filter(l => user?.completedLessons?.some(cl => cl.lessonId === l._id)).length} / {20 + lessons.length} Completed
                         </span>
                       </CardContent>
                     </Card>
@@ -464,7 +537,7 @@ export const LearningHubPage = () => {
                       <div className="mb-4">No modules found in this category.</div>
                       {activeTab === 'PROGRESS' && (
                         <div className="text-sm text-slate-600">
-                          💡 View your progress in <span className="font-bold cursor-pointer hover:text-blue-600" onClick={() => setActiveTab('GERMAN')}>German Learning</span> and <span className="font-bold cursor-pointer hover:text-purple-600" onClick={() => setActiveTab('SIGN_LANGUAGE')}>Sign Language</span> tabs
+                          💡 View your progress in <span className="font-bold cursor-pointer hover:text-blue-600" onClick={() => setActiveTab('GERMAN')}>German Learning</span> and <span className="font-bold cursor-pointer hover:text-purple-600" onClick={() => setActiveTab('ASL_ACADEMY')}>ASL Academy</span> tabs
                         </div>
                       )}
                     </div>

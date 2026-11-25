@@ -1193,7 +1193,31 @@ export const GermanLearning = ({ onLessonComplete }: GermanLearningProps) => {
           <div className="text-center py-20 text-slate-500 italic">Discovering curriculum levels...</div>
         ) : error ? (
           <div className="p-6 bg-rose-50 border border-rose-200 rounded-2xl text-rose-800 text-center">
-            {error}
+            <p>{error}</p>
+            <Button
+              variant="outline"
+              onClick={fetchGermanLevels}
+              disabled={isLoading}
+              className="mt-4 border-rose-300 text-rose-800 hover:bg-rose-100"
+            >
+              Retry
+            </Button>
+          </div>
+        ) : levels.length === 0 ? (
+          <div className="p-8 bg-white border border-[#102c261a] rounded-2xl text-center">
+            <BookOpen className="w-8 h-8 mx-auto text-[#77948c]" />
+            <h4 className="mt-3 font-bold text-[#102c26]">German curriculum is not available yet</h4>
+            <p className="mt-2 text-sm text-slate-600">
+              The lesson database is empty. Seed the learning content on the server, then try again.
+            </p>
+            <Button
+              variant="outline"
+              onClick={fetchGermanLevels}
+              disabled={isLoading}
+              className="mt-4 border-[#102c2640] text-[#102c26]"
+            >
+              Retry
+            </Button>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
